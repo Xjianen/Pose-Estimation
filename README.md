@@ -123,9 +123,9 @@ python train.py --data-root .../shapes --max-shapes 50    --out-dir runs/batch
 # 直接给单个文件夹（覆盖 --data-root）
 python train.py --root /data/.../shapes/shape_1095 --out-dir runs/one
 
-# 密集码本（而非数据集自带的参考视角；与 PTAD 不同预算，不可直接对比）
+# 只用数据集自带的参考视角做码本（PTAD 公平对比的消融；默认是 dense）
 python train.py --data-root .../shapes --shapes shape_1095 \
-    --codebook-mode dense --codebook-cache-dir cache --out-dir runs/dense
+    --codebook-mode refs --out-dir runs/fair
 ```
 
 ### 输出
@@ -144,7 +144,7 @@ runs/fair/
 
 | 选项 | 含义 |
 |---|---|
-| `--codebook-mode refs\|dense` | 用数据集自带参考视角（公平对比 PTAD）或渲染的 azim×elev 网格 |
+| `--codebook-mode refs\|dense` | 默认 `dense`（渲染 azim×elev 网格，模板与查询同视角同 FOV）；`refs` 只用数据集自带参考视角（公平对比 PTAD 的消融） |
 | `--metric chamfer\|iou` | PTAD 的对称区域倒角距离，或 mask IoU |
 | `--hyps K` | 每张查询精修的假设数（`1` 关闭多假设） |
 | `--iters`, `--lr` | 精修调度 |
@@ -156,7 +156,7 @@ runs/fair/
 | `--azim-sign` | `-1` 用于 `render_*` 查询文件名（见第 5 节） |
 | `--rot-target`, `--trans-target` | 通过阈值（默认 10°、0.1） |
 | `--save-rgb`, `--max-queries`, `--device`, `--verbose` | 同时导出对齐 RGB / 每 shape 查询数上限 / 设备 / 逐步日志 |
-| `--azim-step`, `--elev-min/max/step`, `--cb-radius/res/focal`, `--mask-res` | 密集码本的网格和模板分辨率（仅 `--codebook-mode dense` 用） |
+| `--azim-step`, `--elev-min/max/step`, `--cb-radius/res/focal`, `--mask-res` | 密集码本的网格和模板分辨率；`--cb-radius/--cb-focal` 默认 `auto`（取查询标签半径中位数 / 标定后的查询焦距） |
 
 `python train.py --help` 列出全部选项。
 
@@ -248,6 +248,24 @@ gsplat/OpenCV 看 +z。两者差 `S = diag(1,−1,−1)`，是个对合。用已
 ~0.5° / ~0.05 的精度。低于此的误差是标签量化噪声，不是测量——**不要据此声称亚度级
 精度**。
 
+**查询 FOV 与参考不一致（已自动标定）。** shape_1095 的参考渲染是 fov_x≈39.7°
+（焦距 710@512），查询渲染是 **fov_x=50°**（焦距 549@512，= 512/tan25°，21 张拟合
+std<1%）。若沿用参考内参，剪影仍"看着对齐"但相机被推远 1/0.774 倍——表现为每张
+trans 恒定 ~0.73（真实半径 2.5、估计 ~3.23）而渲染图肉眼正确。`dataset/loader.py`
+在加载时用标签位姿投影高斯点云、对比查询 mask 包围盒得到比例 s，再用"近+广角 vs
+远+窄角"的透视判别（归一化剪影 IoU）决定是改焦距还是改半径，并打印结论。
+
+**查询 mask 里混入地板阴影（已自动清除）。** 数据集自带的 `mask/*.png` 是阈值渲染，
+部分光照变体的灰色地板阴影过了白阈值、与物体连通地融进掩码（实测 ~14k px、RGB~145
+灰、位于椅腿拱洞处）。它会把粗匹配的真值模板挤到 top-3 之外（初始角差 120–150°）。
+`remove_floor_shadow` 只删除"无彩色中灰 + 开运算后成块 + 位于掩码质心下方 + 面积
+<50%"的斑块：4 张损坏查询的 IoU 0.80→0.87–0.90，干净查询一个像素都不动。
+
+**多假设要"散开"而不是"取前 K"。** 稠密码本下分数最高的 K 个模板是同一最优解的
+近邻副本，直接取 top-K 等于把 K 次精修全押在一个盆地里。`Codebook.match` 现用
+(azim, elev) 贪心 NMS 选假设，把 K 个精修种子铺进不同盆地——这是多假设精修真正
+生效的前提。
+
 **`.ply` 是纯几何。** 每个高斯是纯白（基色 `[1,1,1]`，std 0），高阶 SH 全为 0；它
 是从网格采样的，不是从图像训练的。所以渲染里唯一能和带纹理查询比较的通道是
 **剪影**；RGB 没有内部结构。深度仍然有意义，是导出的内容之一。
@@ -289,6 +307,7 @@ python check_convention.py --data-root /data/xje/datasets/brokenchairs180k/shape
 
 ```
 train.py                 主驱动：粗估计 → 精修 → 导出 mask/depth → 指标
+analyze_coarse.py        离线诊断粗匹配：逐查询 top-K 初始角差、半径恢复（只需 numpy）
 bench_param.py           camera vs object 参数化的等价性验证与测速
 check_env.py             环境 / gsplat API 自检（含 viewmat 梯度是否可用）
 check_convention.py      上新数据集前确认标定约定一致

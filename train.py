@@ -104,12 +104,38 @@ def save_pose_comparison(path, query_bgr, initial_mask, final_mask, depth_bgr):
     fig.clear()
 
 
-def build_codebook(args, obj, gauss, sh_degree, timer):
+def resolve_cb_geometry(args, queries):
+    """Codebook rendering radius/focal; 'auto' derives them from the queries.
+
+    The auto focal is the CALIBRATED query focal rescaled to the codebook
+    resolution, so the templates are rendered under the same perspective as
+    the queries (the query FOV can differ from the references — see
+    dataset/loader.py). The auto radius is the median filename label, i.e.
+    the distance the queries were actually rendered from.
+    """
+    if args.cb_radius != "auto":
+        radius = float(args.cb_radius)
+    else:
+        labels = [q.params[0] for q in queries if q.params is not None]
+        radius = float(np.median(labels)) if labels else 3.5
+    if args.cb_focal != "auto":
+        focal = float(args.cb_focal)
+    else:
+        q0 = queries[0]
+        focal = float(q0.K[0, 0]) * args.cb_res / float(q0.shape[0])
+    return radius, focal
+
+
+def build_codebook(args, obj, gauss, sh_degree, timer, queries):
     cache = None
     if args.codebook_cache_dir:
         os.makedirs(args.codebook_cache_dir, exist_ok=True)
+        suffix = ""
+        if args.codebook_mode == "dense":
+            radius, focal = resolve_cb_geometry(args, queries)
+            suffix = f"_{focal:.0f}_{radius * 100:.0f}"
         cache = os.path.join(args.codebook_cache_dir,
-                             f"{obj.name}_{args.codebook_mode}.npz")
+                             f"{obj.name}_{args.codebook_mode}{suffix}.npz")
     if cache and os.path.exists(cache):
         with timer("codebook load"):
             cb = Codebook.load(cache)
@@ -122,11 +148,14 @@ def build_codebook(args, obj, gauss, sh_degree, timer):
                                           white_thresh=args.white_thresh,
                                           target=obj.target, obj_size=obj.obj_size)
         else:
+            radius, focal = resolve_cb_geometry(args, queries)
+            print(f"  dense codebook: radius={radius:.2f} focal={focal:.1f}"
+                  f" @ {args.cb_res}px (auto from queries)")
             cb = Codebook.render(gauss, sh_degree, obj.target,
                                  azim_step=args.azim_step,
                                  elev_range=(args.elev_min, args.elev_max),
-                                 elev_step=args.elev_step, radius=args.cb_radius,
-                                 res=args.cb_res, focal=args.cb_focal,
+                                 elev_step=args.elev_step, radius=radius,
+                                 res=args.cb_res, focal=focal,
                                  mask_res=args.mask_res, obj_size=obj.obj_size,
                                  device=args.device, verbose=args.verbose)
     print(f"  codebook: {cb.N} templates ({args.codebook_mode})")
@@ -151,11 +180,11 @@ def run_object(args, obj, timer, metrics, records, batched=False):
     with timer("gaussian load"):
         gauss, sh_degree = load_gaussians_torch(obj.ply_path, dev, args.scale_mult)
     means0, quats0 = gauss["means"].clone(), gauss["quats"].clone()
-    cb = build_codebook(args, obj, gauss, sh_degree, timer)
 
     queries = obj.queries()
     if args.max_queries:
         queries = queries[:args.max_queries]
+    cb = build_codebook(args, obj, gauss, sh_degree, timer, queries)
     mask_dir = os.path.join(args.out_dir, obj.name, "mask")
     depth_dir = os.path.join(args.out_dir, obj.name, "depth")
     reference_dir = os.path.join(args.out_dir, obj.name, "reference_camera")
@@ -238,7 +267,11 @@ def run_object(args, obj, timer, metrics, records, batched=False):
 
         rec = {"shape": obj.name, "query": qs.name, "sel": sel, "loss": loss,
                "hyp_losses": all_losses, "coarse_ms": t_coarse,
-               "refine_s": t_refine, "iters_used": n_it, "RT_est": RT_est.tolist()}
+               "refine_s": t_refine, "iters_used": n_it, "RT_est": RT_est.tolist(),
+               "query_focal": float(qs.K[0, 0]), "radius_scale": qs.radius_scale,
+               "hypotheses": [{"azim": h["azim"], "elev": h["elev"],
+                               "radius": h["radius"], "score": h["score"]}
+                              for h in hyps]}
         RT_gt = qs.gt_pose()
         if RT_gt is None:
             print(f"  {qs.name[:44]:44s}  (no GT in filename; pose exported only)")
@@ -273,7 +306,12 @@ def main():
     ap.add_argument("--device", default="cuda")
 
     cbg = ap.add_argument_group("codebook")
-    cbg.add_argument("--codebook-mode", default="refs", choices=["refs", "dense"])
+    cbg.add_argument("--codebook-mode", default="dense", choices=["refs", "dense"],
+                     help="'dense' renders an azimuth x elevation grid from the 3DGS "
+                          "model (recommended: templates at the queries' own elevations "
+                          "and perspective, measured to cut the initial rotation error "
+                          "from ~11 deg to ~0); 'refs' uses only the 20 shipped "
+                          "reference views (the PTAD-fair ablation)")
     cbg.add_argument("--codebook-cache-dir", default=None)
     cbg.add_argument("--metric", default="chamfer", choices=["chamfer", "iou"])
     cbg.add_argument("--mask-res", type=int, default=160)
@@ -281,9 +319,14 @@ def main():
     cbg.add_argument("--elev-min", type=float, default=15.0)
     cbg.add_argument("--elev-max", type=float, default=45.0)
     cbg.add_argument("--elev-step", type=float, default=2.0)
-    cbg.add_argument("--cb-radius", type=float, default=3.5)
+    cbg.add_argument("--cb-radius", default="auto",
+                     help="codebook render radius; 'auto' = median query filename "
+                          "label (3.5 previously)")
     cbg.add_argument("--cb-res", type=int, default=256)
-    cbg.add_argument("--cb-focal", type=float, default=355.0)
+    cbg.add_argument("--cb-focal", default="auto",
+                     help="codebook render focal at --cb-res; 'auto' = the calibrated "
+                          "query focal rescaled to --cb-res (355.0 previously, which "
+                          "mismatches queries whose FOV differs from the references)")
 
     rf = ap.add_argument_group("refinement")
     rf.add_argument("--hyps", type=int, default=3, help="hypotheses refined per query")

@@ -21,7 +21,7 @@ import os
 
 import numpy as np
 
-from utils.geometry import S4, pose_from_azel
+from utils.geometry import S4, azimuth_diff, pose_from_azel
 from utils.masks import (distance_to_mask, normalise_mask, read_object_mask)
 
 
@@ -124,12 +124,20 @@ class Codebook:
         return self._dist
 
     def match(self, query_png=None, query_mask=None, metric="chamfer",
-              white_thresh=235, query_focal=-1.0, topk=3):
+              white_thresh=235, query_focal=-1.0, topk=3,
+              min_azim_sep=20.0, min_elev_sep=10.0):
         """Coarse match. Returns a list of hypotheses, best first.
 
         metric='chamfer' is PTAD's symmetric region chamfer distance;
         metric='iou' is mask IoU. Both reduce to matmuls over the whole codebook.
         Each hypothesis: {idx, azim, elev, radius, score, RT}.
+
+        The top-k are picked with greedy non-maximum suppression in
+        (azimuth, elevation): with a dense codebook the best-scoring templates
+        are near-duplicates of one optimum, so plain top-k would refine K copies
+        of the SAME basin and never explore the runner-up basins. NMS spreads
+        the K refinement seeds across distinct basins, which is what makes
+        multi-hypothesis refinement actually pay off.
         """
         if query_mask is None:
             raw, W = read_object_mask(query_png, white_thresh)
@@ -149,14 +157,32 @@ class Codebook:
 
         order = np.argsort(score)
         f_q = query_focal if query_focal > 0 else self.focal * (W / self.res)
+
+        def make(i):
+            r_est = self.radius * (self.bbox_px[i] / max(qsize, 1e-6)) \
+                * (f_q / self.focal)
+            return {"idx": int(i), "azim": float(self.azim[i]),
+                    "elev": float(self.elev[i]), "radius": float(r_est),
+                    "score": float(score[i]),
+                    "RT": pose_from_azel(r_est, float(self.azim[i]),
+                                         float(self.elev[i]), self.target)}
+
         hyps = []
-        for i in order[:max(topk, 1)]:
-            r_est = self.radius * (self.bbox_px[i] / max(qsize, 1e-6)) * (f_q / self.focal)
-            hyps.append({"idx": int(i), "azim": float(self.azim[i]),
-                         "elev": float(self.elev[i]), "radius": float(r_est),
-                         "score": float(score[i]),
-                         "RT": pose_from_azel(r_est, float(self.azim[i]),
-                                              float(self.elev[i]), self.target)})
+        if min_azim_sep > 0:
+            for i in order:
+                if len(hyps) >= max(topk, 1):
+                    break
+                a, e = float(self.azim[i]), float(self.elev[i])
+                if any(azimuth_diff(a, h["azim"]) < min_azim_sep
+                       and abs(e - h["elev"]) < min_elev_sep for h in hyps):
+                    continue
+                hyps.append(make(i))
+        for i in order:                              # fill up if NMS came short
+            if len(hyps) >= max(topk, 1):
+                break
+            if any(h["idx"] == int(i) for h in hyps):
+                continue
+            hyps.append(make(i))
         return hyps, f_q, W
 
     def intrinsics(self, focal, width, height=None):
