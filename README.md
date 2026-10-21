@@ -55,6 +55,16 @@ python train.py --data-root /data/xje/datasets/brokenchairs180k/shapes/ --out-di
 ```bash
 conda activate <env>          # 需要带 CUDA 的 PyTorch
 pip install gsplat opencv-python numpy
+pip install gsplat opencv-python numpy matplotlib
+
+# 安装gsplat
+export
+ CUDA_HOME=/path/to/cuda-11.8
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+rm -rf 
+~/.cache/torch_extensions/*
+pip install gsplat==1.5.3
 ```
 
 已在以下环境验证：Python 3.10、torch 2.7.1+cu118、gsplat 1.5.3、opencv 5.0、RTX 3090。
