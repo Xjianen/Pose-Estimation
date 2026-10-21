@@ -54,7 +54,11 @@ class Codebook:
         masks, bbox, az, el = [], [], [], []
         radius, focal, res = None, None, None
         for ref in references:
-            raw, W = read_object_mask(ref["png"], white_thresh)
+            if "mask" in ref:
+                raw = ref["mask"]
+                W = raw.shape[1]
+            else:
+                raw, W = read_object_mask(ref["png"], white_thresh)
             m, sz = normalise_mask(raw, mask_res)
             masks.append(m); bbox.append(sz)
             az.append(ref["azim"] % 360.0); el.append(ref["elev"])

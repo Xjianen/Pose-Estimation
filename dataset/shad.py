@@ -41,7 +41,6 @@ from fnmatch import fnmatch
 import numpy as np
 
 from utils.geometry import pose_from_azel
-from utils.masks import object_mask
 
 
 def _numbers_in(stem):
@@ -55,10 +54,18 @@ def _numbers_in(stem):
 
 
 def parse_view_params(path):
-    """Last three numeric fields of the stem -> (radius, azim, elev), or None.
+    """First decimal field and its two successors -> (radius, azim, elev).
 
-    Handles both `8430_3.0_108_20` and `render_8430_3.8_31_29_anomaly`.
+    Falls back to the last three numbers for names without a decimal radius.
+    Supports extra object/anomaly IDs surrounding the three view parameters.
     """
+    parts = os.path.splitext(os.path.basename(path))[0].split("_")
+    for i, part in enumerate(parts[:-2]):
+        if "." in part:
+            try:
+                return tuple(float(v) for v in parts[i:i + 3])
+            except ValueError:
+                continue
     nums = _numbers_in(os.path.splitext(os.path.basename(path))[0])
     return tuple(nums[-3:]) if len(nums) >= 3 else None
 
@@ -100,6 +107,7 @@ class QuerySample:
         return w, h
 
     def mask(self):
+        from utils.masks import object_mask
         return object_mask(self.image, self.white_thresh)
 
     def gray(self):

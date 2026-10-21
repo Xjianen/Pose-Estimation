@@ -55,6 +55,55 @@ from utils.stats import PoseMetrics, StageTimer
 EXTRA_COLS = ("coarse_ms", "refine_s", "iters", "sel")
 
 
+def render_depth_map(depth_tensor, colormap="turbo"):
+    """Color each depth image using its own valid foreground min/max range."""
+    from matplotlib import colormaps
+    if hasattr(depth_tensor, "detach"):
+        depth_array = depth_tensor.detach().cpu().numpy()
+    else:
+        depth_array = np.asarray(depth_tensor)
+    if depth_array.ndim == 3 and depth_array.shape[-1] == 1:
+        depth_array = depth_array[..., 0]
+    if depth_array.ndim != 2:
+        raise ValueError("Depth must have shape HxW or HxWx1")
+    valid = np.isfinite(depth_array) & (depth_array > 0)
+    if not np.any(valid):
+        return np.zeros((*depth_array.shape, 3), dtype=np.uint8)
+    near = float(depth_array[valid].min())
+    far = float(depth_array[valid].max())
+    if far <= near:
+        valid_color = np.zeros((*depth_array.shape, 3), dtype=np.uint8)
+        valid_color[valid] = 255
+        return valid_color[..., ::-1].copy()
+    normalized = np.zeros(depth_array.shape, dtype=np.float32)
+    normalized[valid] = (far - depth_array[valid]) / (far - near)
+    colored = (colormaps[colormap](normalized)[..., :3] * 255).astype(np.uint8)
+    colored[~valid] = 0
+    return colored[..., ::-1].copy()
+
+
+def save_pose_comparison(path, query_bgr, initial_mask, final_mask, depth_bgr):
+    """Save the four panels with an explicit noninteractive plotting backend."""
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    fig = Figure(figsize=(10, 6.4), layout="constrained")
+    FigureCanvasAgg(fig)
+    axes = fig.subplots(2, 2)
+    panels = [(query_bgr[..., ::-1], "query RGB"),
+              (initial_mask, "initial pose (coarse top-1)"),
+              (final_mask, "final pose"),
+              (depth_bgr[..., ::-1], "final pose depth")]
+    for ax, (image, title) in zip(axes.flat, panels):
+        if image.ndim == 2:
+            ax.imshow(image, cmap="gray", vmin=0, vmax=255)
+        else:
+            ax.imshow(image)
+        ax.set_title(title)
+        ax.axis("off")
+    fig.savefig(path, dpi=150)
+    fig.clear()
+
+
 def build_codebook(args, obj, gauss, sh_degree, timer):
     cache = None
     if args.codebook_cache_dir:
@@ -97,8 +146,7 @@ def run_object(args, obj, timer, metrics, records, batched=False):
     print(f"  pose convention on {len(refs)} refs: max|dR|={dR:.1e} "
           f"max|dt|={dt_:.1e} -> {'OK' if ok else 'MISMATCH'}")
     if not ok:
-        print("  [skip] pose convention mismatch")
-        return
+        raise ValueError("pose convention mismatch")
 
     with timer("gaussian load"):
         gauss, sh_degree = load_gaussians_torch(obj.ply_path, dev, args.scale_mult)
@@ -110,18 +158,44 @@ def run_object(args, obj, timer, metrics, records, batched=False):
         queries = queries[:args.max_queries]
     mask_dir = os.path.join(args.out_dir, obj.name, "mask")
     depth_dir = os.path.join(args.out_dir, obj.name, "depth")
+    reference_dir = os.path.join(args.out_dir, obj.name, "reference_camera")
+    compare_dir = os.path.join(args.out_dir, obj.name, "compare_camera")
     os.makedirs(mask_dir, exist_ok=True)
     os.makedirs(depth_dir, exist_ok=True)
+    os.makedirs(reference_dir, exist_ok=True)
+    os.makedirs(compare_dir, exist_ok=True)
     print(f"  {len(queries)} queries")
+
+    # Guard against silent filename mis-parsing. The old "last three numbers"
+    # rule reads render_<obj>_<anomaly_id>_2.5_120_35_5_anomaly as
+    # (radius, azim, elev) = (120, 35, 5), so the GT radius becomes the azimuth
+    # label and every reported error is garbage (trans ~300 with r=2.5, where
+    # the max possible is 5). Verified against such a run: logged errors
+    # reproduced the mis-parse exactly.
+    ref_radius = float(np.median([ref["radius"] for ref in refs]))
+    gt_radii = [qs.params[0] for qs in queries if qs.params is not None]
+    if gt_radii:
+        q_radius = float(np.median(gt_radii))
+        print(f"  GT from filenames: radius median {q_radius:.2f} "
+              f"(references: {ref_radius:.2f})")
+        if not 0.4 <= q_radius / ref_radius <= 2.5:
+            raise ValueError(
+                f"query GT radius median {q_radius:.2f} is incompatible with the "
+                f"reference radius {ref_radius:.2f} -- query filenames were "
+                f"almost certainly mis-parsed (stale dataset/shad.py?); refusing "
+                f"to evaluate against garbage ground truth. Update dataset/shad.py "
+                f"so parse_view_params takes the first decimal field + its two "
+                f"successors, then rerun.")
 
     for qs in queries:
         W, H = qs.shape
         with timer("coarse"):
-            hyps, f_q, _ = cb.match(query_png=qs.path, metric=args.metric,
+            hyps, f_q, _ = cb.match(query_mask=qs.mask(), metric=args.metric,
+                                    query_focal=qs.K[0, 0],
                                     white_thresh=args.white_thresh, topk=args.hyps)
         t_coarse = timer.last("coarse") * 1000
 
-        K = torch.tensor(cb.intrinsics(f_q, W, H), dtype=torch.float32, device=dev)
+        K = torch.tensor(qs.K, dtype=torch.float32, device=dev)
         tgt = silhouette_targets(qs.mask(), dev,
                                  gray_np=qs.gray() if args.w_edge > 0 else None)
 
@@ -141,11 +215,23 @@ def run_object(args, obj, timer, metrics, records, batched=False):
         with timer("export"):
             gauss["means"], gauss["quats"] = means0, quats0
             rgb, alpha, depth = render_at_pose(gauss, RT_est, K, W, H, sh_degree)
+            _, initial_alpha, _ = render_at_pose(
+                gauss, hyps[0]["RT"], K, W, H, sh_degree)
             stem = os.path.splitext(qs.name)[0]
+            final_mask = (alpha > 0.5).astype(np.uint8) * 255
+            initial_mask = (initial_alpha > 0.5).astype(np.uint8) * 255
+            depth_values = np.where(alpha > 0.5, depth, 0.0).astype(np.float32)
+            depth_colored = render_depth_map(
+                depth_values)
+            depth_colored[alpha <= 0.5] = 0
             cv2.imwrite(os.path.join(mask_dir, stem + "_mask.png"),
-                        (alpha > 0.5).astype(np.uint8) * 255)
+                        final_mask)
             np.save(os.path.join(depth_dir, stem + "_depth.npy"),
-                    np.where(alpha > 0.5, depth, 0.0).astype(np.float32))
+                    depth_values)
+            cv2.imwrite(os.path.join(reference_dir, stem + "_depth.png"), depth_colored)
+            np.save(os.path.join(reference_dir, stem + "_depth.npy"), depth_values)
+            save_pose_comparison(os.path.join(compare_dir, qs.name),
+                                 qs.image, initial_mask, final_mask, depth_colored)
             if args.save_rgb:
                 cv2.imwrite(os.path.join(args.out_dir, obj.name, stem + "_aligned.png"),
                             (rgb * 255).astype(np.uint8)[..., ::-1])
@@ -241,21 +327,23 @@ def main():
     import torch
     timer = StageTimer(sync=(torch.device(args.device).type == "cuda"))
 
+    failures = []
     if args.root:
-        objects = [ShadObject(args.root, args.azim_sign, args.white_thresh,
-                              args.ref_subdir, args.query_subdir)]
+        object_paths = [args.root]
         print(f"single shape: {args.root}")
     else:
         ds = ShadDataset(args.data_root, args.shape_pattern, args.azim_sign,
                          args.white_thresh, args.ref_subdir, args.query_subdir)
         print(ds)
         if ds.incomplete:
+            failures.extend({"shape": n, "stage": "assets", "error": ", ".join(miss)}
+                            for n, miss in ds.incomplete.items())
             for n, miss in list(ds.incomplete.items())[:5]:
                 print(f"  skipped {n}: missing {', '.join(miss)}")
             if len(ds.incomplete) > 5:
                 print(f"  ... and {len(ds.incomplete)-5} more incomplete shapes")
-        objects = ds.select(args.shapes, limit=args.max_shapes)
-        if not objects:
+        object_paths = ds.selected_paths(args.shapes, limit=args.max_shapes)
+        if not object_paths:
             raise SystemExit("no shapes selected")
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -263,7 +351,7 @@ def main():
     records = []
     mode = resolve_param(args.param, torch.device(args.device))
     batched = args.batched and mode == "camera"
-    print(f"\n{len(objects)} shape(s) | metric={args.metric} | hyps={args.hyps} "
+    print(f"\n{len(object_paths)} shape(s) | metric={args.metric} | hyps={args.hyps} "
           f"| iters={args.iters} | w_dt={args.w_dt} | sym_azim={args.sym_azim} "
           f"| param={args.param}->{mode}"
           + (f" | early-stop({args.patience}, {args.min_delta})"
@@ -271,8 +359,31 @@ def main():
           + (" | batched" if batched else " | sequential"))
     metrics.header(extra_cols=EXTRA_COLS)
 
-    for obj in objects:
-        run_object(args, obj, timer, metrics, records, batched)
+    out_json = os.path.join(args.out_dir, "results.json")
+    def save_progress(summary=None):
+        temporary = out_json + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump({"config": vars(args), "summary": summary or {},
+                       "timing": dict(timer.totals), "per_query": records,
+                       "failures": failures}, f, indent=2)
+        os.replace(temporary, out_json)
+
+    # Instantiate one shape at a time; do not preload the entire dataset.
+    for index, path in enumerate(object_paths, 1):
+        name = os.path.basename(os.path.normpath(path))
+        print(f"\n[{index}/{len(object_paths)}] {name}")
+        try:
+            obj = ShadObject(path, args.azim_sign, args.white_thresh,
+                             args.ref_subdir, args.query_subdir)
+            run_object(args, obj, timer, metrics, records, batched)
+        except Exception as exc:
+            if args.root:
+                raise
+            failures.append({"shape": name, "stage": "pose_estimation",
+                             "error": f"{type(exc).__name__}: {exc}"})
+            print(f"  [failed] {name}: {exc}")
+        finally:
+            save_progress()
 
     summary = metrics.report() if metrics.rows else {}
     if metrics.rows:
@@ -282,13 +393,13 @@ def main():
     print(f"\nexported per-query aligned reference under {args.out_dir}/<shape>/")
     print("  mask/<query>_mask.png    uint8 0/255")
     print("  depth/<query>_depth.npy  float32, 0 outside the object")
+    print("  reference_camera/<query>_depth.png + _depth.npy  colored depth + values")
+    print("  compare_camera/<query>.png  query / initial mask / final mask / depth")
     print("\nNOTE filename ground truth is rounded (azim/elev 1°, radius 0.1), so "
           "errors\n     below ~0.5° / ~0.05 sit at the label-quantisation floor.")
 
-    out_json = os.path.join(args.out_dir, "results.json")
-    with open(out_json, "w") as f:
-        json.dump({"config": vars(args), "summary": summary,
-                   "timing": dict(timer.totals), "per_query": records}, f, indent=2)
+    save_progress(summary)
+    print(f"  failed/incomplete shapes: {len(failures)} (see failures in results.json)")
     print(f"  metrics -> {out_json}")
 
 

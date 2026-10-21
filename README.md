@@ -1,5 +1,32 @@
 # 查询图像到模型的对齐（用于 3D 异常检测）
 
+本地下载版数据加载：`python dataset.py --root "../shape_1095"`。
+查询 RGB 从 `images/` 读取，物体掩码从 `mask/` 按同名配对；参考 RGB/相机
+从 `mv_images/` 读取，参考物体掩码从 `train/` 按同名配对。掩码阈值为 127，
+白色是前景。返回的 `K` 按掩码分辨率缩放，`RT` 保留 OpenGL 世界到相机约定。
+没有 OBJ 时，通过参考相机射线拟合观察中心；模型使用 `point_cloud/*.ply`。
+查询内参假设与参考渲染保持相同视场角，查询 GT 从文件名推导，仍有标签量化误差。
+加载器需要 NumPy 和 Pillow，完整位姿流程还需要 OpenCV、PyTorch 和 gsplat。
+运行位姿估计：`python train.py --root "../shape_1095" --out-dir runs/shape_1095`。
+
+服务器全量运行（不设置 `--root`、`--max-shapes` 或 `--max-queries`）：
+
+```bash
+python train.py --data-root /data/xje/datasets/brokenchairs180k/shapes/ --out-dir runs/all_shapes
+```
+
+默认遍历所有 `shape_*`，逐个加载并处理其 `images/` 中全部 PNG。
+输出按 `runs/all_shapes/<shape>/mask/` 和 `depth/` 隔离。
+每处理完一个 shape 更新 `results.json`，包含逐图 `RT_est` 和失败/缺失列表
+`failures`；单个 shape 失败后继续下一个，失败 shape 中未处理的图像不会被标记为成功。
+
+每个 shape 还输出 `reference_camera/<query>_depth.png`（turbo 彩色深度）和
+`reference_camera/<query>_depth.npy`（float32 原始深度，物体外为 0），以及
+`compare_camera/<query>.png` 四格图：查询 RGB、粗估计 top-1 初始位姿 mask、
+最终位姿 mask、最终位姿彩色深度。绘图需要 Matplotlib，支持无显示器服务器。
+彩色深度图按每张图前景有效深度的最小值和最大值自动映射，背景显示为黑色；
+不会改变保存的 `.npy` 深度值。原有 `mask/` 和 `depth/` 输出也保留。
+
 估计**带纹理查询渲染图**相对**无纹理 3D 模型**的相机位姿，并导出对齐后的参考
 **掩码（mask）**和**深度（depth）**，供下游异常检测阶段与查询图做比对。
 
@@ -61,6 +88,12 @@ python check_env.py
 文件名里夹了额外的 id 字段（如 `render_1334_16105_2.5_20_25_1_normal`），
 此时「最后三个」是错的，正确的取法是「第一个带小数点的字段 + 紧随其后的两个字段」。
 **用 `check_convention.py`（见第 4 节）能一次确认解析规则**。
+
+防呆：`train.py` 会在每个 shape 上把查询文件名解析出的 GT 半径中位数与参考半径
+对比，比值超出 [0.4, 2.5] 直接报错拒跑。这是为防上面这类**静默**解析错误——
+shape_1095 曾因服务器上运行旧版 `parse_view_params`（「最后三个数字」规则），把
+`render_1095_2013_2.5_120_35_5_ano` 解析成 (r,az,el)=(120,35,5)，平移误差全部
+显示成 ~100–358（半径 2.5 时理论上限是 5）。
 
 缺 mesh / `.ply` / 参考 / 查询的 shape 会被报告并跳过。
 

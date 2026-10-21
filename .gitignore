@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# WorkBuddy local data
+.workbuddy/
+
+# Run outputs and caches
+runs/
+cache/
+*.npz.tmp
+
+# OS
+Thumbs.db
+.DS_Store
