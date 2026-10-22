@@ -42,6 +42,9 @@ import json
 import os
 import time
 
+# Suppress "no CUDA arch list found" warning; the batch script also exports this.
+os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0")
+
 import numpy as np
 
 from dataset import ShadDataset, ShadObject

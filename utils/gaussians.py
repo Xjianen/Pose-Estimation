@@ -17,8 +17,20 @@ in case a coarser render is wanted.
 import numpy as np
 
 
+_PLY_TYPE_MAP = {
+    "float": "f4", "double": "f8", "uchar": "u1", "int": "i4",
+    "uint": "u4", "short": "i2", "ushort": "u2",
+}
+
+
 def load_gaussians_ply(path):
-    """Parse a standard 3DGS .ply (binary_little_endian, all float32 properties)."""
+    """Parse a standard 3DGS .ply.
+
+    Handles all three PLY storage formats: ascii, binary_little_endian (the
+    common 3DGS case), and binary_big_endian.  Some shapes in the dataset
+    ship ascii-format PLY files, which previously crashed the loader's hard
+    assertion on 'binary_little_endian'.
+    """
     with open(path, "rb") as f:
         hdr = b""
         while True:
@@ -27,11 +39,37 @@ def load_gaussians_ply(path):
             if line.strip() == b"end_header":
                 break
         txt = hdr.decode("latin1").splitlines()
-        n = next(int(l.split()[-1]) for l in txt if l.startswith("element vertex"))
-        props = [l.split()[-1] for l in txt if l.startswith("property")]
-        assert "binary_little_endian" in "".join(txt), "expected binary_little_endian ply"
-        data = np.frombuffer(f.read(n * len(props) * 4),
-                             dtype=np.float32).reshape(n, len(props))
+
+    fmt = "binary_little_endian"
+    for l in txt:
+        if l.startswith("format "):
+            fmt = l.split()[1]
+            break
+
+    n = next(int(l.split()[-1]) for l in txt if l.startswith("element vertex"))
+
+    # Parse property names + PLY types (skip list properties, not in 3DGS).
+    prop_info = []
+    for l in txt:
+        if l.startswith("property ") and not l.startswith("property list"):
+            parts = l.split()
+            prop_info.append((parts[2], parts[1]))     # (name, ply_type)
+    props = [p[0] for p in prop_info]
+
+    if fmt == "ascii":
+        body = f.read().decode("latin1").strip().splitlines()[:n]
+        data = np.array([[float(x) for x in line.split()] for line in body],
+                        dtype=np.float32)
+    else:
+        bo = ">" if fmt == "binary_big_endian" else "<"
+        np_types = [np.dtype(_PLY_TYPE_MAP.get(t, "f4")).newbyteorder(bo)
+                    for _, t in prop_info]
+        dt = np.dtype(list(zip(props, np_types)))
+        raw = np.frombuffer(f.read(n * dt.itemsize), dtype=dt)
+        data = np.empty((n, len(props)), dtype=np.float32)
+        for i, p in enumerate(props):
+            data[:, i] = raw[p]
+
     col = {name: i for i, name in enumerate(props)}
 
     def g(*names):
