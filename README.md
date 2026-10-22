@@ -156,6 +156,7 @@ runs/fair/
 | `--azim-sign` | `-1` 用于 `render_*` 查询文件名（见第 5 节） |
 | `--rot-target`, `--trans-target` | 通过阈值（默认 10°、0.1） |
 | `--save-rgb`, `--max-queries`, `--device`, `--verbose` | 同时导出对齐 RGB / 每 shape 查询数上限 / 设备 / 逐步日志 |
+| `--max-refs N`, `--ref-seed S` | 随机采样 N 张参考视角做消融（`0`=全用，默认）；同 seed 可复现、不同 seed 选不同子集。仅影响 `--codebook-mode refs`；`dense` 模式由 `--azim-step/--elev-step` 控制模板数 |
 | `--azim-step`, `--elev-min/max/step`, `--cb-radius/res/focal`, `--mask-res` | 密集码本的网格和模板分辨率；`--cb-radius/--cb-focal` 默认 `auto`（取查询标签半径中位数 / 标定后的查询焦距） |
 
 `python train.py --help` 列出全部选项。

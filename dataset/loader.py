@@ -158,13 +158,15 @@ class ShadObject(BaseObject):
     """Compatible with train.py; calibration RT is OpenGL world-to-camera."""
 
     def __init__(self, root, azim_sign=-1.0, white_thresh=235,
-                 ref_subdir="mv_images", query_subdir="images", sym_azim=0.0):
+                 ref_subdir="mv_images", query_subdir="images", sym_azim=0.0,
+                 max_refs=0, ref_seed=0):
         root = Path(root).resolve()
         missing = self.missing_assets(root, ref_subdir, query_subdir)
         if missing:
             raise FileNotFoundError(f"{root}: missing {', '.join(missing)}")
         self.root, self.name = str(root), root.name
         self.azim_sign, self.white_thresh, self.sym_azim = azim_sign, white_thresh, sym_azim
+        self.max_refs, self.ref_seed = int(max_refs), int(ref_seed)
         self.ref_dir, self.query_dir = str(root / ref_subdir), str(root / query_subdir)
         self.ply_path = str(sorted((root / "point_cloud").glob("*.ply"))[0])
         meshes = sorted(root.glob("*.obj"))

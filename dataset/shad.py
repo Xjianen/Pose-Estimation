@@ -36,6 +36,7 @@ scoring (0 = none, the default).
 import glob
 import json
 import os
+import random
 from fnmatch import fnmatch
 
 import numpy as np
@@ -131,12 +132,15 @@ class ShadObject:
     """A single object's assets and its query set."""
 
     def __init__(self, root, azim_sign=-1.0, white_thresh=235,
-                 ref_subdir="mv_images", query_subdir="images", sym_azim=0.0):
+                 ref_subdir="mv_images", query_subdir="images", sym_azim=0.0,
+                 max_refs=0, ref_seed=0):
         self.root = os.path.normpath(root)
         self.name = os.path.basename(self.root)
         self.white_thresh = white_thresh
         self.azim_sign = azim_sign
         self.sym_azim = sym_azim
+        self.max_refs = int(max_refs)
+        self.ref_seed = int(ref_seed)
 
         meshes = sorted(glob.glob(os.path.join(root, "*.obj")))
         if not meshes:
@@ -190,6 +194,10 @@ class ShadObject:
             out.append({"png": png, "json": js, "radius": r, "azim": az % 360.0,
                         "elev": el, "K": d["K"],
                         "RT": np.asarray(d["RT"], dtype=np.float64)})
+        if self.max_refs and len(out) > self.max_refs:
+            rng = random.Random(self.ref_seed)
+            idx = sorted(rng.sample(range(len(out)), self.max_refs))
+            out = [out[i] for i in idx]
         return out
 
     def queries(self):

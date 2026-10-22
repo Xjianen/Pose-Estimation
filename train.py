@@ -299,6 +299,11 @@ def main():
     src.add_argument("--shape-pattern", default="shape_*")
     src.add_argument("--max-shapes", type=int, default=0)
     src.add_argument("--max-queries", type=int, default=0, help="per shape")
+    src.add_argument("--max-refs", type=int, default=0,
+                    help="randomly subsample N reference views (0 = all); "
+                         "pair with --ref-seed for reproducibility")
+    src.add_argument("--ref-seed", type=int, default=0,
+                    help="seed for --max-refs subsampling")
     src.add_argument("--ref-subdir", default="mv_images")
     src.add_argument("--query-subdir", default="images")
 
@@ -417,7 +422,10 @@ def main():
         print(f"\n[{index}/{len(object_paths)}] {name}")
         try:
             obj = ShadObject(path, args.azim_sign, args.white_thresh,
-                             args.ref_subdir, args.query_subdir)
+                             args.ref_subdir, args.query_subdir,
+                             max_refs=args.max_refs, ref_seed=args.ref_seed)
+            if args.max_refs:
+                print(f"  references: subsampled {args.max_refs} (seed={args.ref_seed})")
             run_object(args, obj, timer, metrics, records, batched)
         except Exception as exc:
             if args.root:
