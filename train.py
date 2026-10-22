@@ -186,13 +186,17 @@ def run_object(args, obj, timer, metrics, records, batched=False):
         queries = queries[:args.max_queries]
     cb = build_codebook(args, obj, gauss, sh_degree, timer, queries)
     mask_dir = os.path.join(args.out_dir, obj.name, "mask")
-    depth_dir = os.path.join(args.out_dir, obj.name, "depth")
-    reference_dir = os.path.join(args.out_dir, obj.name, "reference_camera")
-    compare_dir = os.path.join(args.out_dir, obj.name, "compare_camera")
+    reference_dir = (os.path.join(args.reference_out_dir, obj.name)
+                     if args.reference_out_dir
+                     else os.path.join(args.out_dir, obj.name, "reference_camera"))
+    depth_dir = None if args.lean else os.path.join(args.out_dir, obj.name, "depth")
+    compare_dir = None if args.lean else os.path.join(args.out_dir, obj.name, "compare_camera")
     os.makedirs(mask_dir, exist_ok=True)
-    os.makedirs(depth_dir, exist_ok=True)
     os.makedirs(reference_dir, exist_ok=True)
-    os.makedirs(compare_dir, exist_ok=True)
+    if depth_dir:
+        os.makedirs(depth_dir, exist_ok=True)
+    if compare_dir:
+        os.makedirs(compare_dir, exist_ok=True)
     print(f"  {len(queries)} queries")
 
     # Guard against silent filename mis-parsing. The old "last three numbers"
@@ -255,12 +259,14 @@ def run_object(args, obj, timer, metrics, records, batched=False):
             depth_colored[alpha <= 0.5] = 0
             cv2.imwrite(os.path.join(mask_dir, stem + "_mask.png"),
                         final_mask)
-            np.save(os.path.join(depth_dir, stem + "_depth.npy"),
-                    depth_values)
+            if depth_dir:
+                np.save(os.path.join(depth_dir, stem + "_depth.npy"),
+                        depth_values)
             cv2.imwrite(os.path.join(reference_dir, stem + "_depth.png"), depth_colored)
             np.save(os.path.join(reference_dir, stem + "_depth.npy"), depth_values)
-            save_pose_comparison(os.path.join(compare_dir, qs.name),
-                                 qs.image, initial_mask, final_mask, depth_colored)
+            if compare_dir:
+                save_pose_comparison(os.path.join(compare_dir, qs.name),
+                                     qs.image, initial_mask, final_mask, depth_colored)
             if args.save_rgb:
                 cv2.imwrite(os.path.join(args.out_dir, obj.name, stem + "_aligned.png"),
                             (rgb * 255).astype(np.uint8)[..., ::-1])
@@ -284,6 +290,8 @@ def run_object(args, obj, timer, metrics, records, batched=False):
             metrics.print_row(extra_cols=EXTRA_COLS)
             rec.update({"rot_deg": rot, "trans": trans, "sym_k": k})
         records.append(rec)
+    if args.skip_if_done:
+        open(os.path.join(reference_dir, ".done"), "w").close()
 
 
 def main():
@@ -369,6 +377,17 @@ def main():
     ev.add_argument("--rot-target", type=float, default=10.0)
     ev.add_argument("--trans-target", type=float, default=0.1)
     ev.add_argument("--save-rgb", action="store_true")
+    ev.add_argument("--reference-out-dir", default=None,
+                    help="write reference_camera to DIR/<shape>/ instead of under "
+                         "--out-dir; use when batch-rendering a dataset-wide "
+                         "reference_camera folder")
+    ev.add_argument("--lean", action="store_true",
+                    help="lean export: only mask + reference_camera (skip the "
+                         "duplicate depth/ dir and the compare_camera panels); "
+                         "for batch dataset generation")
+    ev.add_argument("--skip-if-done", action="store_true",
+                    help="skip a shape whose reference_camera dir already has a "
+                         ".done sentinel (resumable batch runs)")
     ev.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -419,6 +438,13 @@ def main():
     # Instantiate one shape at a time; do not preload the entire dataset.
     for index, path in enumerate(object_paths, 1):
         name = os.path.basename(os.path.normpath(path))
+        if args.skip_if_done:
+            ref_dir_name = (os.path.join(args.reference_out_dir, name)
+                            if args.reference_out_dir
+                            else os.path.join(args.out_dir, name, "reference_camera"))
+            if os.path.exists(os.path.join(ref_dir_name, ".done")):
+                print(f"[{index}/{len(object_paths)}] {name} -> skip (done)")
+                continue
         print(f"\n[{index}/{len(object_paths)}] {name}")
         try:
             obj = ShadObject(path, args.azim_sign, args.white_thresh,

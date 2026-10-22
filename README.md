@@ -126,7 +126,46 @@ python train.py --root /data/.../shapes/shape_1095 --out-dir runs/one
 # 只用数据集自带的参考视角做码本（PTAD 公平对比的消融；默认是 dense）
 python train.py --data-root .../shapes --shapes shape_1095 \
     --codebook-mode refs --out-dir runs/fair
+
+# 批量渲染整个数据集的 reference_camera（多进程并行，详见下方批量跑小节）
+#   --reference-out-dir  colored depth + depth.npy 输出到 DIR/<shape>/
+#   --lean               只导 mask + reference_camera，不生成重复的 depth/ 和 compare_camera/
+#   --skip-if-done       跳过已写 .done 的 shape（可断点续跑）
+python train.py --root /data/.../shapes/shape_1095 \
+    --reference-out-dir /data/.../brokenchairs180k/reference_camera \
+    --lean --skip-if-done --out-dir /data/.../brokenchairs180k/runs/shape_1095
 ```
+
+## 批量跑整个数据集（8000+ shape / 一张卡）
+
+`train.py` 本身是串行（一次一个 shape），单卡跑 8000 shape 约 12 天。`run_batch.sh`
+用 `xargs -P N` 起 N 个独立 python 进程并行，共享一张卡；每个进程 `--root` 跑单
+shape，互不影响、可断点续跑。
+
+```bash
+cd ~/project/Third_Work/PTAD_plus
+./run_batch.sh            # 默认 8 workers
+./run_batch.sh 12         # 12 workers（先看 nvidia-smi 再加）
+
+# 另开终端监控显存，稳定后按余量把 -P 调到 10-12
+watch -n5 nvidia-smi
+```
+
+跑完后所有 shape 的精度分散在 `runs/<shape>/results.json`，用
+`aggregate_results.py` 汇总：
+
+```bash
+python aggregate_results.py /data/.../brokenchairs180k/runs --top-errors 20
+# 输出：rot/trans pass 率、中位/mean/max、失败 shape、最差 query
+```
+
+输出结构：
+- `reference_camera/<shape>/<query>_depth.png` + `_depth.npy`（下游异常检测用）
+- `runs/<shape>/mask/<query>_mask.png` + `runs/<shape>/results.json`（位姿评估用）
+
+**单 worker 显存约 1.5-3 GB**（含 CUDA context），48G 卡 8 起步留足余量；显存长
+期低于 70% 才往上加。`--lean` 省掉重复的 `depth/` 目录和 `compare_camera` 四联
+图（各 ~150KB/张），8000 shape 可省数十 GB。```
 
 ### 输出
 
