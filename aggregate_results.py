@@ -27,9 +27,13 @@ def main():
     ap.add_argument("--trans-target", type=float, default=0.1)
     ap.add_argument("--top-errors", type=int, default=10,
                     help="print this many worst queries by rotation error")
+    ap.add_argument("--save", default=None,
+                    help="write a merged all_results.json with every per-query "
+                         "rot/trans error + dataset summary to this path")
     args = ap.parse_args()
 
     rows = []
+    all_records = []
     failed_shapes = []
     n_json = 0
     for js in sorted(glob.glob(os.path.join(args.runs_dir, "*", "results.json"))):
@@ -44,6 +48,16 @@ def main():
             if "rot_deg" in rec and "trans" in rec:
                 rows.append({"shape": rec["shape"], "query": rec["query"],
                              "rot": rec["rot_deg"], "trans": rec["trans"]})
+                all_records.append({
+                    "shape": rec["shape"], "query": rec["query"],
+                    "rot_deg": rec["rot_deg"], "trans": rec["trans"],
+                    "sel": rec.get("sel"), "coarse_ms": rec.get("coarse_ms"),
+                    "refine_s": rec.get("refine_s"),
+                    "iters": rec.get("iters_used"),
+                    "query_focal": rec.get("query_focal"),
+                    "radius_scale": rec.get("radius_scale"),
+                    "ok": bool(rec["rot_deg"] < args.rot_target
+                               and rec["trans"] < args.trans_target)})
         for f in d.get("failures", []):
             failed_shapes.append((f.get("shape", "?"),
                                   f"{f.get('stage','?')}: {f.get('error','?')}"))
@@ -94,6 +108,28 @@ def main():
     worst = sorted(rows, key=lambda r: r["rot"], reverse=True)[:args.top_errors]
     for r in worst:
         print(f"  {r['shape']}/{r['query'][:40]:40s} rot={r['rot']:7.2f} trans={r['trans']:.3f}")
+
+    if args.save:
+        out = {
+            "runs_dir": args.runs_dir,
+            "config": {"rot_target": args.rot_target,
+                       "trans_target": args.trans_target},
+            "summary": {
+                "n_shapes": n_json, "n_queries": len(rows),
+                "n_failed_shapes": len(failed_shapes),
+                "rot_pass": int(rot_ok.sum()), "rot_pass_rate": float(rot_ok.mean()),
+                "trans_pass": int(trans_ok.sum()), "trans_pass_rate": float(trans_ok.mean()),
+                "both_pass": int(both.sum()), "both_pass_rate": float(both.mean()),
+                "rot_median": float(np.median(rots)), "rot_mean": float(rots.mean()),
+                "rot_max": float(rots.max()),
+                "trans_median": float(np.median(trans)), "trans_mean": float(trans.mean()),
+                "trans_max": float(trans.max())},
+            "per_query": all_records,
+            "failed_shapes": [{"shape": n, "error": e} for n, e in failed_shapes],
+        }
+        with open(args.save, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=2)
+        print(f"\nmerged results written to: {args.save}")
 
 
 if __name__ == "__main__":

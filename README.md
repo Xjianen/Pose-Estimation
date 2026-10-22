@@ -144,19 +144,28 @@ shape，互不影响、可断点续跑。
 
 ```bash
 cd ~/project/Third_Work/PTAD_plus
-./run_batch.sh            # 默认 8 workers
+./run_batch.sh            # 默认 8 workers（每 worker 一行 `[N/total] shape status`）
 ./run_batch.sh 12         # 12 workers（先看 nvidia-smi 再加）
 
 # 另开终端监控显存，稳定后按余量把 -P 调到 10-12
 watch -n5 nvidia-smi
 ```
 
+脚本给 train.py 传 `--quiet`（每 shape 只打印一行 `name: Nq rot X/N(med max) trans Y/N
+(med max) both Z/N=pp% Tts`，省掉逐 query 表 / convention / intrinsics / codebook /
+timing 块——8000 shape 下避免刷屏），并用 flock 维护全局进度计数 `[N/total]`，每 shape
+打印 `ok`/`FAILED`/`(skip)` 状态。跑完打印 `shapes: N ok / M failed / TOTAL total`
+并自动汇总。
+
 跑完后所有 shape 的精度分散在 `runs/<shape>/results.json`，用
 `aggregate_results.py` 汇总：
 
 ```bash
-python aggregate_results.py /data/.../brokenchairs180k/runs --top-errors 20
+python aggregate_results.py /data/.../brokenchairs180k/runs \
+    --save /data/.../brokenchairs180k/runs/all_results.json --top-errors 20
 # 输出：rot/trans pass 率、中位/mean/max、失败 shape、最差 query
+# --save：把每个 query 的 rot_deg/trans/sel/coarse_ms/refine_s/iters 等
+#         合并成一个 all_results.json（含数据集级 summary）
 ```
 
 输出结构：

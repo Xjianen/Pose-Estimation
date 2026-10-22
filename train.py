@@ -40,6 +40,7 @@ Examples
 import argparse
 import json
 import os
+import time
 
 import numpy as np
 
@@ -139,7 +140,8 @@ def build_codebook(args, obj, gauss, sh_degree, timer, queries):
     if cache and os.path.exists(cache):
         with timer("codebook load"):
             cb = Codebook.load(cache)
-        print(f"  codebook: {cb.N} templates (cached)")
+        if not args.quiet:
+            print(f"  codebook: {cb.N} templates (cached)")
         return cb
 
     with timer("codebook build"):
@@ -149,8 +151,9 @@ def build_codebook(args, obj, gauss, sh_degree, timer, queries):
                                           target=obj.target, obj_size=obj.obj_size)
         else:
             radius, focal = resolve_cb_geometry(args, queries)
-            print(f"  dense codebook: radius={radius:.2f} focal={focal:.1f}"
-                  f" @ {args.cb_res}px (auto from queries)")
+            if not args.quiet:
+                print(f"  dense codebook: radius={radius:.2f} focal={focal:.1f}"
+                      f" @ {args.cb_res}px (auto from queries)")
             cb = Codebook.render(gauss, sh_degree, obj.target,
                                  azim_step=args.azim_step,
                                  elev_range=(args.elev_min, args.elev_max),
@@ -158,7 +161,8 @@ def build_codebook(args, obj, gauss, sh_degree, timer, queries):
                                  res=args.cb_res, focal=focal,
                                  mask_res=args.mask_res, obj_size=obj.obj_size,
                                  device=args.device, verbose=args.verbose)
-    print(f"  codebook: {cb.N} templates ({args.codebook_mode})")
+    if not args.quiet:
+        print(f"  codebook: {cb.N} templates ({args.codebook_mode})")
     if cache:
         cb.save(cache)
     return cb
@@ -171,9 +175,10 @@ def run_object(args, obj, timer, metrics, records, batched=False):
 
     refs = obj.references()
     dR, dt_, ok = verify_pose_convention(refs, obj.target)
-    print(f"\n{obj}")
-    print(f"  pose convention on {len(refs)} refs: max|dR|={dR:.1e} "
-          f"max|dt|={dt_:.1e} -> {'OK' if ok else 'MISMATCH'}")
+    if not args.quiet:
+        print(f"\n{obj}")
+        print(f"  pose convention on {len(refs)} refs: max|dR|={dR:.1e} "
+              f"max|dt|={dt_:.1e} -> {'OK' if ok else 'MISMATCH'}")
     if not ok:
         raise ValueError("pose convention mismatch")
 
@@ -197,7 +202,8 @@ def run_object(args, obj, timer, metrics, records, batched=False):
         os.makedirs(depth_dir, exist_ok=True)
     if compare_dir:
         os.makedirs(compare_dir, exist_ok=True)
-    print(f"  {len(queries)} queries")
+    if not args.quiet:
+        print(f"  {len(queries)} queries")
 
     # Guard against silent filename mis-parsing. The old "last three numbers"
     # rule reads render_<obj>_<anomaly_id>_2.5_120_35_5_anomaly as
@@ -209,8 +215,9 @@ def run_object(args, obj, timer, metrics, records, batched=False):
     gt_radii = [qs.params[0] for qs in queries if qs.params is not None]
     if gt_radii:
         q_radius = float(np.median(gt_radii))
-        print(f"  GT from filenames: radius median {q_radius:.2f} "
-              f"(references: {ref_radius:.2f})")
+        if not args.quiet:
+            print(f"  GT from filenames: radius median {q_radius:.2f} "
+                  f"(references: {ref_radius:.2f})")
         if not 0.4 <= q_radius / ref_radius <= 2.5:
             raise ValueError(
                 f"query GT radius median {q_radius:.2f} is incompatible with the "
@@ -280,18 +287,36 @@ def run_object(args, obj, timer, metrics, records, batched=False):
                               for h in hyps]}
         RT_gt = qs.gt_pose()
         if RT_gt is None:
-            print(f"  {qs.name[:44]:44s}  (no GT in filename; pose exported only)")
+            if not args.quiet:
+                print(f"  {qs.name[:44]:44s}  (no GT in filename; pose exported only)")
         else:
             rot, trans, k = pose_error_symmetric(RT_est, RT_gt, obj.target,
                                                  args.sym_azim)
             metrics.add(f"{obj.name}/{qs.name}", rot, trans,
                         extra={"coarse_ms": t_coarse, "refine_s": t_refine,
                                "iters": n_it, "sel": sel})
-            metrics.print_row(extra_cols=EXTRA_COLS)
+            if not args.quiet:
+                metrics.print_row(extra_cols=EXTRA_COLS)
             rec.update({"rot_deg": rot, "trans": trans, "sym_k": k})
         records.append(rec)
     if args.skip_if_done:
         open(os.path.join(reference_dir, ".done"), "w").close()
+
+
+def _print_shape_summary(name, rows, elapsed, args):
+    """One-line per-shape summary for --quiet (batch) mode."""
+    if not rows:
+        print(f"{name}: no GT rows; {elapsed:.0f}s")
+        return
+    rots = np.array([r["rot"] for r in rows])
+    trans = np.array([r["trans"] for r in rows])
+    rpass = int((rots < args.rot_target).sum())
+    tpass = int((trans < args.trans_target).sum())
+    both = int(sum(1 for r in rows if r["ok"]))
+    n = len(rows)
+    print(f"{name}: {n}q rot {rpass}/{n}(med{np.median(rots):.1f} max{rots.max():.1f}) "
+          f"trans {tpass}/{n}(med{np.median(trans):.3f} max{trans.max():.3f}) "
+          f"both {both}/{n}={100*both/n:.0f}% {elapsed:.0f}s")
 
 
 def main():
@@ -377,6 +402,11 @@ def main():
     ev.add_argument("--rot-target", type=float, default=10.0)
     ev.add_argument("--trans-target", type=float, default=0.1)
     ev.add_argument("--save-rgb", action="store_true")
+    ev.add_argument("--quiet", action="store_true",
+                    help="minimal stdout: one summary line per shape (rot/trans "
+                         "pass, medians, elapsed) instead of the per-query table, "
+                         "convention/intrinsics/codebook/timing blocks. For batch "
+                         "runs where the per-shape results.json holds the detail")
     ev.add_argument("--reference-out-dir", default=None,
                     help="write reference_camera to DIR/<shape>/ instead of under "
                          "--out-dir; use when batch-rendering a dataset-wide "
@@ -397,11 +427,13 @@ def main():
     failures = []
     if args.root:
         object_paths = [args.root]
-        print(f"single shape: {args.root}")
+        if not args.quiet:
+            print(f"single shape: {args.root}")
     else:
         ds = ShadDataset(args.data_root, args.shape_pattern, args.azim_sign,
                          args.white_thresh, args.ref_subdir, args.query_subdir)
-        print(ds)
+        if not args.quiet:
+            print(ds)
         if ds.incomplete:
             failures.extend({"shape": n, "stage": "assets", "error": ", ".join(miss)}
                             for n, miss in ds.incomplete.items())
@@ -418,13 +450,14 @@ def main():
     records = []
     mode = resolve_param(args.param, torch.device(args.device))
     batched = args.batched and mode == "camera"
-    print(f"\n{len(object_paths)} shape(s) | metric={args.metric} | hyps={args.hyps} "
-          f"| iters={args.iters} | w_dt={args.w_dt} | sym_azim={args.sym_azim} "
-          f"| param={args.param}->{mode}"
-          + (f" | early-stop({args.patience}, {args.min_delta})"
-             if args.patience else "")
-          + (" | batched" if batched else " | sequential"))
-    metrics.header(extra_cols=EXTRA_COLS)
+    if not args.quiet:
+        print(f"\n{len(object_paths)} shape(s) | metric={args.metric} | hyps={args.hyps} "
+              f"| iters={args.iters} | w_dt={args.w_dt} | sym_azim={args.sym_azim} "
+              f"| param={args.param}->{mode}"
+              + (f" | early-stop({args.patience}, {args.min_delta})"
+                 if args.patience else "")
+              + (" | batched" if batched else " | sequential"))
+        metrics.header(extra_cols=EXTRA_COLS)
 
     out_json = os.path.join(args.out_dir, "results.json")
     def save_progress(summary=None):
@@ -443,14 +476,19 @@ def main():
                             if args.reference_out_dir
                             else os.path.join(args.out_dir, name, "reference_camera"))
             if os.path.exists(os.path.join(ref_dir_name, ".done")):
-                print(f"[{index}/{len(object_paths)}] {name} -> skip (done)")
+                print(f"{name}: skip (done)" if args.quiet
+                      else f"[{index}/{len(object_paths)}] {name} -> skip (done)")
                 continue
-        print(f"\n[{index}/{len(object_paths)}] {name}")
+        if not args.quiet:
+            print(f"\n[{index}/{len(object_paths)}] {name}")
+        rows_before = len(metrics.rows)
+        t0 = time.time()
         try:
             obj = ShadObject(path, args.azim_sign, args.white_thresh,
                              args.ref_subdir, args.query_subdir,
-                             max_refs=args.max_refs, ref_seed=args.ref_seed)
-            if args.max_refs:
+                             max_refs=args.max_refs, ref_seed=args.ref_seed,
+                             verbose=not args.quiet)
+            if args.max_refs and not args.quiet:
                 print(f"  references: subsampled {args.max_refs} (seed={args.ref_seed})")
             run_object(args, obj, timer, metrics, records, batched)
         except Exception as exc:
@@ -458,26 +496,32 @@ def main():
                 raise
             failures.append({"shape": name, "stage": "pose_estimation",
                              "error": f"{type(exc).__name__}: {exc}"})
-            print(f"  [failed] {name}: {exc}")
+            print(f"{name} FAILED: {type(exc).__name__}: {exc}" if args.quiet
+                  else f"  [failed] {name}: {exc}")
+        else:
+            if args.quiet:
+                _print_shape_summary(name, metrics.rows[rows_before:],
+                                     time.time() - t0, args)
         finally:
             save_progress()
 
-    summary = metrics.report() if metrics.rows else {}
-    if metrics.rows:
+    summary = metrics.report(quiet=args.quiet) if metrics.rows else {}
+    if metrics.rows and not args.quiet:
         metrics.hypothesis_summary()
-    timer.report(per_query_stages=("coarse", "refine", "export"))
-
-    print(f"\nexported per-query aligned reference under {args.out_dir}/<shape>/")
-    print("  mask/<query>_mask.png    uint8 0/255")
-    print("  depth/<query>_depth.npy  float32, 0 outside the object")
-    print("  reference_camera/<query>_depth.png + _depth.npy  colored depth + values")
-    print("  compare_camera/<query>.png  query / initial mask / final mask / depth")
-    print("\nNOTE filename ground truth is rounded (azim/elev 1°, radius 0.1), so "
-          "errors\n     below ~0.5° / ~0.05 sit at the label-quantisation floor.")
+    if not args.quiet:
+        timer.report(per_query_stages=("coarse", "refine", "export"))
+        print(f"\nexported per-query aligned reference under {args.out_dir}/<shape>/")
+        print("  mask/<query>_mask.png    uint8 0/255")
+        print("  depth/<query>_depth.npy  float32, 0 outside the object")
+        print("  reference_camera/<query>_depth.png + _depth.npy  colored depth + values")
+        print("  compare_camera/<query>.png  query / initial mask / final mask / depth")
+        print("\nNOTE filename ground truth is rounded (azim/elev 1°, radius 0.1), so "
+              "errors\n     below ~0.5° / ~0.05 sit at the label-quantisation floor.")
 
     save_progress(summary)
-    print(f"  failed/incomplete shapes: {len(failures)} (see failures in results.json)")
-    print(f"  metrics -> {out_json}")
+    if not args.quiet:
+        print(f"  failed/incomplete shapes: {len(failures)} (see failures in results.json)")
+        print(f"  metrics -> {out_json}")
 
 
 if __name__ == "__main__":

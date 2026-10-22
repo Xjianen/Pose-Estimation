@@ -159,7 +159,7 @@ class ShadObject(BaseObject):
 
     def __init__(self, root, azim_sign=-1.0, white_thresh=235,
                  ref_subdir="mv_images", query_subdir="images", sym_azim=0.0,
-                 max_refs=0, ref_seed=0):
+                 max_refs=0, ref_seed=0, verbose=True):
         root = Path(root).resolve()
         missing = self.missing_assets(root, ref_subdir, query_subdir)
         if missing:
@@ -167,6 +167,7 @@ class ShadObject(BaseObject):
         self.root, self.name = str(root), root.name
         self.azim_sign, self.white_thresh, self.sym_azim = azim_sign, white_thresh, sym_azim
         self.max_refs, self.ref_seed = int(max_refs), int(ref_seed)
+        self.verbose = bool(verbose)
         self.ref_dir, self.query_dir = str(root / ref_subdir), str(root / query_subdir)
         self.ply_path = str(sorted((root / "point_cloud").glob("*.ply"))[0])
         meshes = sorted(root.glob("*.obj"))
@@ -324,12 +325,13 @@ class ShadObject(BaseObject):
         # detects (and corrects) a query FOV that differs from the references.
         focal_scale, radius_scale, note = self._calibrate_query_intrinsics(
             ref, entries)
-        print(f"  query intrinsics: {note}")
-        shadowed = [(s.name, s.shadow_px) for s, _ in entries if s.shadow_px > 0]
-        if shadowed:
-            biggest = max(px for _, px in shadowed)
-            print(f"  floor shadow removed from {len(shadowed)}/{len(entries)} "
-                  f"query masks (largest blob {biggest} px)")
+        if self.verbose:
+            print(f"  query intrinsics: {note}")
+            shadowed = [(s.name, s.shadow_px) for s, _ in entries if s.shadow_px > 0]
+            if shadowed:
+                biggest = max(px for _, px in shadowed)
+                print(f"  floor shadow removed from {len(shadowed)}/{len(entries)} "
+                      f"query masks (largest blob {biggest} px)")
         for sample, (w, h) in entries:
             K = np.diag([w / w0, h / h0, 1.0]) @ np.asarray(ref["K"], float)
             K[0, 0] *= focal_scale

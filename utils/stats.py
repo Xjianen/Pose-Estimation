@@ -101,18 +101,19 @@ class PoseMetrics:
         line += f" {'Y' if r['ok'] else 'N':>3}"
         print(line)
 
-    def report(self):
+    def report(self, quiet=False):
         n = len(self.rows)
         r, t = self.rot, self.trans
         npass = sum(1 for x in self.rows if x["ok"])
-        print("\n" + "=" * 74)
-        print(f"ACCURACY over {n} queries "
-              f"(targets: rot < {self.rot_target}°, trans < {self.trans_target})")
-        print(f"  rotation °  : median={np.median(r):7.3f}  mean={r.mean():7.3f}  "
-              f"max={r.max():7.3f}   pass {int((r < self.rot_target).sum())}/{n}")
-        print(f"  translation : median={np.median(t):7.4f}  mean={t.mean():7.4f}  "
-              f"max={t.max():7.4f}   pass {int((t < self.trans_target).sum())}/{n}")
-        print(f"  BOTH pass   : {npass}/{n}  ({100.0*npass/n:.1f}%)")
+        if not quiet:
+            print("\n" + "=" * 74)
+            print(f"ACCURACY over {n} queries "
+                  f"(targets: rot < {self.rot_target}°, trans < {self.trans_target})")
+            print(f"  rotation °  : median={np.median(r):7.3f}  mean={r.mean():7.3f}  "
+                  f"max={r.max():7.3f}   pass {int((r < self.rot_target).sum())}/{n}")
+            print(f"  translation : median={np.median(t):7.4f}  mean={t.mean():7.4f}  "
+                  f"max={t.max():7.4f}   pass {int((t < self.trans_target).sum())}/{n}")
+            print(f"  BOTH pass   : {npass}/{n}  ({100.0*npass/n:.1f}%)")
         return {"n": n, "rot_median": float(np.median(r)), "rot_mean": float(r.mean()),
                 "rot_max": float(r.max()), "trans_median": float(np.median(t)),
                 "trans_mean": float(t.mean()), "trans_max": float(t.max()),
