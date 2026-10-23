@@ -40,61 +40,61 @@ def load_gaussians_ply(path):
                 break
         txt = hdr.decode("latin1").splitlines()
 
-    fmt = "binary_little_endian"
-    for l in txt:
-        if l.startswith("format "):
-            fmt = l.split()[1]
-            break
+        fmt = "binary_little_endian"
+        for l in txt:
+            if l.startswith("format "):
+                fmt = l.split()[1]
+                break
 
-    # Walk header lines tracking which element we are inside, so only
-    # vertex properties are collected (face/edge properties would inflate
-    # the record size and break the binary read).
-    n = 0
-    prop_info = []
-    cur_elem = None
-    for l in txt:
-        ws = l.split()
-        if not ws:
-            continue
-        if ws[0] == "element":
-            cur_elem = ws[1]
-            if cur_elem == "vertex":
-                n = int(ws[2])
-        elif ws[0] == "property" and cur_elem == "vertex":
-            if ws[1] == "list":
-                continue            # vertex list props don't exist in 3DGS
-            prop_info.append((ws[2], ws[1]))     # (name, ply_type)
-    props = [p[0] for p in prop_info]
+        # Walk header lines tracking which element we are inside, so only
+        # vertex properties are collected (face/edge properties would inflate
+        # the record size and break the binary read).
+        n = 0
+        prop_info = []
+        cur_elem = None
+        for l in txt:
+            ws = l.split()
+            if not ws:
+                continue
+            if ws[0] == "element":
+                cur_elem = ws[1]
+                if cur_elem == "vertex":
+                    n = int(ws[2])
+            elif ws[0] == "property" and cur_elem == "vertex":
+                if ws[1] == "list":
+                    continue            # vertex list props don't exist in 3DGS
+                prop_info.append((ws[2], ws[1]))     # (name, ply_type)
+        props = [p[0] for p in prop_info]
 
-    if n == 0:
-        raise ValueError(f"{path}: PLY has no 'element vertex'")
-    required = ["x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2",
-                "scale_0", "scale_1", "scale_2",
-                "rot_0", "rot_1", "rot_2", "rot_3", "opacity"]
-    missing = [p for p in required if p not in props]
-    if missing:
-        raise ValueError(f"{path}: PLY missing required 3DGS properties: {missing}")
+        if n == 0:
+            raise ValueError(f"{path}: PLY has no 'element vertex'")
+        required = ["x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2",
+                    "scale_0", "scale_1", "scale_2",
+                    "rot_0", "rot_1", "rot_2", "rot_3", "opacity"]
+        missing = [p for p in required if p not in props]
+        if missing:
+            raise ValueError(f"{path}: PLY missing required 3DGS properties: {missing}")
 
-    if fmt == "ascii":
-        body = f.read().decode("latin1").strip().splitlines()[:n]
-        data = np.array([[float(x) for x in line.split()] for line in body],
-                        dtype=np.float32)
-    else:
-        bo = ">" if fmt == "binary_big_endian" else "<"
-        np_types = [np.dtype(_PLY_TYPE_MAP.get(t, "f4")).newbyteorder(bo)
-                    for _, t in prop_info]
-        dt = np.dtype(list(zip(props, np_types)))
-        need = n * dt.itemsize
-        buf = f.read(need)
-        if len(buf) < need:
-            raise ValueError(
-                f"{path}: PLY binary section too short — expected {need} bytes "
-                f"for {n} vertices x {dt.itemsize} bytes (props={props}), "
-                f"got {len(buf)}")
-        raw = np.frombuffer(buf, dtype=dt)
-        data = np.empty((n, len(props)), dtype=np.float32)
-        for i, p in enumerate(props):
-            data[:, i] = raw[p]
+        if fmt == "ascii":
+            body = f.read().decode("latin1").strip().splitlines()[:n]
+            data = np.array([[float(x) for x in line.split()] for line in body],
+                            dtype=np.float32)
+        else:
+            bo = ">" if fmt == "binary_big_endian" else "<"
+            np_types = [np.dtype(_PLY_TYPE_MAP.get(t, "f4")).newbyteorder(bo)
+                        for _, t in prop_info]
+            dt = np.dtype(list(zip(props, np_types)))
+            need = n * dt.itemsize
+            buf = f.read(need)
+            if len(buf) < need:
+                raise ValueError(
+                    f"{path}: PLY binary section too short — expected {need} bytes "
+                    f"for {n} vertices x {dt.itemsize} bytes (props={props}), "
+                    f"got {len(buf)}")
+            raw = np.frombuffer(buf, dtype=dt)
+            data = np.empty((n, len(props)), dtype=np.float32)
+            for i, p in enumerate(props):
+                data[:, i] = raw[p]
 
     col = {name: i for i, name in enumerate(props)}
 
