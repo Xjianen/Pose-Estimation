@@ -93,11 +93,12 @@ python check_env.py
     ...
 ```
 
-视角参数取自文件名中**最后三个数字字段**，所以 `1095_3.0_108_20` 和
-`render_1095_3.8_31_29_anomaly` 都能正确解析。**注意**：某些 shape（如 `shape_1334`）
+视角参数取自文件名中**第一个带小数点的数字字段及其紧随其后的两个字段**，
+所以 `1095_3.0_108_20` 和 `render_1095_3.8_31_29_anomaly` 都能正确解析
+(r=3.0/3.8, azim=108/31, elev=20/29)。**注意**：某些 shape（如 `shape_1334`）
 文件名里夹了额外的 id 字段（如 `render_1334_16105_2.5_20_25_1_normal`），
-此时「最后三个」是错的，正确的取法是「第一个带小数点的字段 + 紧随其后的两个字段」。
-**用 `check_convention.py`（见第 4 节）能一次确认解析规则**。
+此时取「最后三个数字」是错的（会取成 20,25,1），必须用「第一个小数字段」规则
+（取成 2.5,20,25）。**用 `check_convention.py`（见第 6 节）能一次确认解析规则**。
 
 防呆：`train.py` 会在每个 shape 上把查询文件名解析出的 GT 半径中位数与参考半径
 对比，比值超出 [0.4, 2.5] 直接报错拒跑。这是为防上面这类**静默**解析错误——
@@ -142,14 +143,27 @@ python train.py --root /data/.../shapes/shape_1095 \
 用 `xargs -P N` 起 N 个独立 python 进程并行，共享一张卡；每个进程 `--root` 跑单
 shape，互不影响、可断点续跑。
 
+脚本默认使用 **GPU 1**、**`--codebook-mode refs`**（只用数据集自带 20 张参考视角，
+不渲染 dense 码本），前台运行（Ctrl+C 可干净停止）：
+
 ```bash
 cd ~/project/Third_Work/PTAD_plus
-./run_batch.sh            # 默认 8 workers（每 worker 一行 `[N/total] shape status`）
-./run_batch.sh 12         # 12 workers（先看 nvidia-smi 再加）
+chmod +x run_batch.sh          # 首次需要加可执行权限
+./run_batch.sh                 # 默认 8 workers, GPU 1, refs 模式
+./run_batch.sh 12              # 12 workers（先看 nvidia-smi 再加）
+CUDA_VISIBLE_DEVICES=0 ./run_batch.sh   # 换到 GPU 0
 
 # 另开终端监控显存，稳定后按余量把 -P 调到 10-12
 watch -n5 nvidia-smi
 ```
+
+脚本设置了 `TORCH_CUDA_ARCH_LIST=8.0` 以消除 PyTorch 的 "no CUDA arch list" 警告。
+`train.py` 顶部也有 `os.environ.setdefault` 兜底，直接 `python train.py` 也不报。
+
+`.ply` 加载器支持三种 PLY 格式（`ascii`、`binary_little_endian`、`binary_big_endian`），
+只收集 `element vertex` 的属性（不误收 face element 的属性导致记录长度膨胀）。
+如果某个 shape 的 PLY 缺少标准 3DGS 属性或二进制段长度不足，会报清晰错误而非
+`np.frombuffer` 崩溃。
 
 脚本给 train.py 传 `--quiet`（每 shape 只打印一行 `name: Nq rot X/N(med max) trans Y/N
 (med max) both Z/N=pp% Tts`，省掉逐 query 表 / convention / intrinsics / codebook /
