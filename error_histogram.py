@@ -149,7 +149,9 @@ def main():
     print(f"shapes with results.json : {n_json}")
     print(f"per-query rows           : {total}")
     print()
-    header = f"{'trans\\rot':>10s}  " + "  ".join(f"{l:>6s}" for l in ROT_LABELS) + "  |  total"
+    label_trans_rot = "trans\\rot"
+    header = f"{label_trans_rot:>10s}  " + "  ".join(f"{l:>6s}" for l in ROT_LABELS) + "  |  total"
+
     print(header)
     print("-" * len(header))
     for i, tlab in enumerate(TRANS_LABELS_CM):
