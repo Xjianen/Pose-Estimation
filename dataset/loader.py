@@ -159,15 +159,16 @@ class ShadObject(BaseObject):
 
     def __init__(self, root, azim_sign=-1.0, white_thresh=235,
                  ref_subdir="mv_images", query_subdir="images", sym_azim=0.0,
-                 max_refs=0, ref_seed=0, verbose=True):
+                 max_refs=0, ref_seed=0, verbose=True, mask_subdir="mask"):
         root = Path(root).resolve()
-        missing = self.missing_assets(root, ref_subdir, query_subdir)
+        missing = self.missing_assets(root, ref_subdir, query_subdir, mask_subdir)
         if missing:
             raise FileNotFoundError(f"{root}: missing {', '.join(missing)}")
         self.root, self.name = str(root), root.name
         self.azim_sign, self.white_thresh, self.sym_azim = azim_sign, white_thresh, sym_azim
         self.max_refs, self.ref_seed = int(max_refs), int(ref_seed)
         self.verbose = bool(verbose)
+        self.mask_subdir = mask_subdir
         self.ref_dir, self.query_dir = str(root / ref_subdir), str(root / query_subdir)
         self.ply_path = str(sorted((root / "point_cloud").glob("*.ply"))[0])
         meshes = sorted(root.glob("*.obj"))
@@ -197,12 +198,13 @@ class ShadObject(BaseObject):
             self.obj_size = float(np.ptp(xyz, axis=0).max())
 
     @staticmethod
-    def missing_assets(root, ref_subdir="mv_images", query_subdir="images"):
+    def missing_assets(root, ref_subdir="mv_images", query_subdir="images",
+                       mask_subdir="mask"):
         root = Path(root)
         missing = []
         for subdir, pattern in [("point_cloud", "*.ply"), (ref_subdir, "*.json"),
                                 (query_subdir, "*.png"), ("train", "*.png"),
-                                ("mask", "*.png")]:
+                                (mask_subdir, "*.png")]:
             if not list((root / subdir).glob(pattern)):
                 missing.append(f"{subdir}/{pattern}")
         return missing
@@ -312,7 +314,7 @@ class ShadObject(BaseObject):
         h0, w0 = ref["mask"].shape
         entries = []
         for path in sorted(Path(self.query_dir).glob("*.png")):
-            mask_path = Path(self.root) / "mask" / path.name
+            mask_path = Path(self.root) / self.mask_subdir / path.name
             if not mask_path.is_file():
                 raise FileNotFoundError(mask_path)
             sample = QuerySample(path, self.target, self.azim_sign,
@@ -346,17 +348,20 @@ class ShadObject(BaseObject):
 
 class ShadDataset(BaseDataset):
     def __init__(self, root, pattern="shape_*", azim_sign=-1.0, white_thresh=235,
-                 ref_subdir="mv_images", query_subdir="images", require_complete=True):
+                 ref_subdir="mv_images", query_subdir="images", require_complete=True,
+                 mask_subdir="mask"):
         self.root = str(Path(root).resolve())
         if not Path(self.root).is_dir():
             raise FileNotFoundError(self.root)
         self.pattern, self.azim_sign, self.white_thresh = pattern, azim_sign, white_thresh
         self.ref_subdir, self.query_subdir = ref_subdir, query_subdir
+        self.mask_subdir = mask_subdir
         self.incomplete, self.shape_dirs = {}, []
         for path in sorted(Path(self.root).glob(pattern)):
             if not path.is_dir():
                 continue
-            missing = ShadObject.missing_assets(path, ref_subdir, query_subdir)
+            missing = ShadObject.missing_assets(path, ref_subdir, query_subdir,
+                                                mask_subdir)
             if missing and require_complete:
                 self.incomplete[path.name] = missing
             else:
@@ -365,7 +370,8 @@ class ShadDataset(BaseDataset):
     def object(self, name):
         path = Path(name) if Path(name).is_dir() else Path(self.root) / name
         return ShadObject(path, self.azim_sign, self.white_thresh,
-                          self.ref_subdir, self.query_subdir)
+                          self.ref_subdir, self.query_subdir,
+                          mask_subdir=self.mask_subdir)
 
     def selected_paths(self, spec=None, limit=0):
         """Select paths without loading any model or images."""

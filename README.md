@@ -137,6 +137,33 @@ python train.py --root /data/.../shapes/shape_1095 \
     --lean --skip-if-done --out-dir /data/.../brokenchairs180k/runs/shape_1095
 ```
 
+## 3.1 用高质量 mask 替换阈值 mask（可选，推荐）
+
+原始 `mask/*.png` 是法向缓冲阈值化的产物，会把**地板阴影**并入轮廓、填平椅子的
+拱洞/椅腿间隙，还带椒盐噪声。`segmentation/` 用**零样本 SlimSAM + 确定性 CV 兜底**
+重生成干净前景，写入 `<shape>/mask_clean/`，不覆盖原目录：
+
+```bash
+python segmentation/download_models.py          # 14 MB 权重，一次性
+python segmentation/run_segmentation.py \
+    --root /data/xje/datasets/brokenchairs180k/shapes \
+    --workers 8 --report seg_report.json
+python segmentation/evaluate.py \
+    --root /data/xje/datasets/brokenchairs180k/shapes \
+    --csv seg_eval.csv --panel seg_eval.png
+
+# 位姿估计改用新 mask（默认仍是 mask，行为不变）
+python train.py --root /data/.../shapes/shape_1095 \
+    --codebook-mode refs --mask-subdir mask_clean --out-dir runs/clean_mask
+```
+
+本地 45 张实测：边界对齐 0.9694→**0.9968**、阴影残留 0.1392→**0.1084**、
+孤立噪声块 24.27→**0**，平均每张剔除 3758 px 阴影。详见
+[`segmentation/README.md`](segmentation/README.md)。
+
+> **别拿 `render/` 或 `reference/` 当查询视角真值**：它们用另一套内参
+> （39.66° FOV vs 查询 50°），边界与 RGB 强梯度对齐率只有 0.86（旧 mask 是 0.98）。
+
 ## 批量跑整个数据集（8000+ shape / 一张卡）
 
 `train.py` 本身是串行（一次一个 shape），单卡跑 8000 shape 约 12 天。`run_batch.sh`
@@ -219,6 +246,7 @@ runs/fair/
 | `--rot-target`, `--trans-target` | 通过阈值（默认 10°、0.1） |
 | `--save-rgb`, `--max-queries`, `--device`, `--verbose` | 同时导出对齐 RGB / 每 shape 查询数上限 / 设备 / 逐步日志 |
 | `--max-refs N`, `--ref-seed S` | 随机采样 N 张参考视角做消融（`0`=全用，默认）；同 seed 可复现、不同 seed 选不同子集。仅影响 `--codebook-mode refs`；`dense` 模式由 `--azim-step/--elev-step` 控制模板数 |
+| `--mask-subdir DIR` | 查询 mask 所在子目录，默认 `mask`；配合 `segmentation/` 用 `mask_clean`（见 3.1 节） |
 | `--azim-step`, `--elev-min/max/step`, `--cb-radius/res/focal`, `--mask-res` | 密集码本的网格和模板分辨率；`--cb-radius/--cb-focal` 默认 `auto`（取查询标签半径中位数 / 标定后的查询焦距） |
 
 `python train.py --help` 列出全部选项。
@@ -383,6 +411,15 @@ utils/
     pose_init.py         Codebook：from_references / render / match
     pose_refine.py       SE(3) 精修、多假设选择
     stats.py             StageTimer、PoseMetrics
+segmentation/            重生成干净查询 mask（零样本 SlimSAM + CV 兜底，见 3.1 节）
+    core.py              粗前景 / 阴影模型 / prompt / SAM 封装 / 质量指标
+    download_models.py   下载 14 MB ONNX 权重（镜像回退）
+    run_segmentation.py  批量 CLI（多进程、断点续跑、JSON 报告、对照图）
+    evaluate.py          新旧 mask 对比（表格 + CSV + 图）
+    README.md            方案选型、消融、实测指标
+aggregate_results.py     汇总 runs/*/results.json
+error_histogram.py       旋转×平移误差 4×4 分布 → CSV + 热力图
+run_batch.sh             全数据集多进程批处理
 ```
 
 `Codebook.match` 和 `refine_pose` 是匹配与精修的**唯一实现**——刻意不复制，因为

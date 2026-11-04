@@ -10,6 +10,13 @@ runs/
 cache/
 *.npz.tmp
 
+# Downloaded ONNX weights + generated segmentation results
+segmentation/models/
+mask_clean/
+seg_report.json
+seg_eval.csv
+seg_eval.png
+
 # OS
 Thumbs.db
 .DS_Store

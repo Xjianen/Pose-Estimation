@@ -342,6 +342,9 @@ def main():
                     help="seed for --max-refs subsampling")
     src.add_argument("--ref-subdir", default="mv_images")
     src.add_argument("--query-subdir", default="images")
+    src.add_argument("--mask-subdir", default="mask",
+                     help="query mask folder inside each shape; use mask_clean "
+                          "after running segmentation/run_segmentation.py")
 
     ap.add_argument("--out-dir", default="runs/out")
     ap.add_argument("--device", default="cuda")
@@ -434,7 +437,8 @@ def main():
             print(f"single shape: {args.root}")
     else:
         ds = ShadDataset(args.data_root, args.shape_pattern, args.azim_sign,
-                         args.white_thresh, args.ref_subdir, args.query_subdir)
+                         args.white_thresh, args.ref_subdir, args.query_subdir,
+                         mask_subdir=args.mask_subdir)
         if not args.quiet:
             print(ds)
         if ds.incomplete:
@@ -489,6 +493,7 @@ def main():
         try:
             obj = ShadObject(path, args.azim_sign, args.white_thresh,
                              args.ref_subdir, args.query_subdir,
+                             mask_subdir=args.mask_subdir,
                              max_refs=args.max_refs, ref_seed=args.ref_seed,
                              verbose=not args.quiet)
             if args.max_refs and not args.quiet:
