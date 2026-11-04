@@ -12,7 +12,10 @@ cache/
 
 # Downloaded ONNX weights + generated segmentation results
 segmentation/models/
+segmentation/models_sam2/
 mask_clean/
+mask_refined/
+mask_sam2/
 seg_report.json
 seg_eval.csv
 seg_eval.png

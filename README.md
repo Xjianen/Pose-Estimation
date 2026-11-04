@@ -182,6 +182,27 @@ FP/FN 边界带分解、细结构分层和配对 win rate。协议与实测结�
 > **别拿 `render/` 或 `reference/` 当查询视角真值**：它们用另一套内参
 > （39.66° FOV vs 查询 50°），边界与 RGB 强梯度对齐率只有 0.86（旧 mask 是 0.98）。
 
+**想要更高的 mIoU / 更稳的位姿输入，用 `--mode refine`（无需任何权重）**：
+`segmentation/refine.py` 只做两件确定性的事——删掉与图像外部连通的地板阴影、
+再对旧 mask 做一次全局 1.01 边界校准（补偿 query 与硬边标签渲染之间约 1% 的
+FOV/光栅化错位），因此不会像 SAM 那样漏掉细椅腿。官方 GT 上：
+固定种子随机 2000 张 raw mIoU **0.9002 → 0.9344**、`mIoU@trim2` **0.9554**；
+1200 张（600 拟合 / 600 留出）**0.9116 → 0.9449**、trim2 0.9651。
+
+```bash
+python segmentation/run_segmentation.py \
+    --root /data/xje/datasets/brokenchairs180k/shapes \
+    --mode refine --workers 8          # 写 mask_refined/，约 5 ms/张
+python train.py --root /data/.../shapes/shape_1095 \
+    --codebook-mode refs --mask-subdir mask_refined
+```
+
+注意：严格 raw mIoU 仍**没有**到 0.95（大样本 0.9344、最好留出 0.9449）；
+稳定超过 0.95 的是 `mIoU@trim2`。换 SAM2 / SAM3 / ViT-H 不解决这个差距——
+误差主要是两次渲染的边界量化与浅色细结构，而不是语义分割能力。实测
+SAM2.1-B+ ONNX 反而低于 SlimSAM。完整消融、诚实边界与校准脚本见
+[`segmentation/README.md`](segmentation/README.md) 第 9 节。
+
 ## 批量跑整个数据集（8000+ shape / 一张卡）
 
 `train.py` 本身是串行（一次一个 shape），单卡跑 8000 shape 约 12 天。`run_batch.sh`
@@ -264,7 +285,7 @@ runs/fair/
 | `--rot-target`, `--trans-target` | 通过阈值（默认 10°、0.1） |
 | `--save-rgb`, `--max-queries`, `--device`, `--verbose` | 同时导出对齐 RGB / 每 shape 查询数上限 / 设备 / 逐步日志 |
 | `--max-refs N`, `--ref-seed S` | 随机采样 N 张参考视角做消融（`0`=全用，默认）；同 seed 可复现、不同 seed 选不同子集。仅影响 `--codebook-mode refs`；`dense` 模式由 `--azim-step/--elev-step` 控制模板数 |
-| `--mask-subdir DIR` | 查询 mask 所在子目录，默认 `mask`；配合 `segmentation/` 用 `mask_clean`（见 3.1 节） |
+| `--mask-subdir DIR` | 查询 mask 所在子目录，默认 `mask`；配合 `segmentation/` 用 `mask_clean` 或 `mask_refined`（见 3.1 节） |
 | `--azim-step`, `--elev-min/max/step`, `--cb-radius/res/focal`, `--mask-res` | 密集码本的网格和模板分辨率；`--cb-radius/--cb-focal` 默认 `auto`（取查询标签半径中位数 / 标定后的查询焦距） |
 
 `python train.py --help` 列出全部选项。
@@ -429,9 +450,13 @@ utils/
     pose_init.py         Codebook：from_references / render / match
     pose_refine.py       SE(3) 精修、多假设选择
     stats.py             StageTimer、PoseMetrics
-segmentation/            重生成干净查询 mask（零样本 SlimSAM + CV 兜底，见 3.1 节）
+segmentation/            重生成干净查询 mask（见 3.1 / 9 节）
     core.py              粗前景 / 阴影模型 / prompt / SAM 封装 / 质量指标
+    refine.py            无模型：去地板 + 全局边界校准（raw mIoU 最优）
+    calibrate_refine.py  disjoint split 拟合校准常数 + 留出集评估
+    sam2_onnx.py         可选 SAM 2.1 ONNX 后端（对比实验）
     download_models.py   下载 14 MB ONNX 权重（镜像回退）
+    download_sam2.py     下载 SAM 2.1 ONNX 权重
     run_segmentation.py  批量 CLI（多进程、断点续跑、JSON 报告、对照图）
     evaluate.py          新旧 mask 无监督对比（表格 + CSV + 图）
     eval_miou.py         官方 seg_new_* 真值 mIoU（多指标 + CSV + JSON + 图）

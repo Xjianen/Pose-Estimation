@@ -119,7 +119,10 @@ python segmentation/evaluate.py \
 
 | 参数 | 说明 |
 |---|---|
-| `--mode auto\|sam\|cv` | `auto`=有模型用 SAM、否则 CV（默认）；`cv` 纯确定性、最快 |
+| `--mode auto\|sam\|cv\|refine\|sam2` | `auto`=有模型用 SAM、否则 CV（默认）；`cv` 纯确定性；`refine`=无模型去地板 + 边界校准（**raw mIoU 最优**，见第 9 节，输出 `mask_refined/`）；`sam2`=可选 SAM2.1 ONNX |
+| `--source-subdir` | `refine` 模式读取的旧 mask 子目录，默认 `mask` |
+| `--scale / --origin / --dx / --dy` | `refine` 的全局边界校准，默认 `1.01 / centre / 0 / 0`；`--scale 1.0` 关闭 |
+| `--prior-threshold` | `refine` 放宽颜色先验（默认 200 = 不改旧 mask；205/210 在部分抽样上 +0.001） |
 | `--dilate N` | 输出 mask 的边界补偿（`+1`=膨胀 1px），默认 `0` 不改动；仅在需要对齐硬边 GT 的 mIoU 时开启，见第 8 节 |
 | `--workers N` | shape 级多进程（每个进程独立 ONNX session）；GPU 模式建议 1 |
 | `--model-dir` | 权重目录，默认 `segmentation/models/` |
@@ -315,3 +318,165 @@ shape 布局。
 **输出**：终端表格、逐图逐方法 CSV（含 `iou` / `iou_trim` / `fp` / `fn` /
 边界带占比 / 连通块）、汇总 JSON、`miou.png`（挑 dIoU 最大/最小的样本，
 RGB \| GT \| baseline \| best，全英文标注）。
+
+---
+
+## 9. 能不能把 mIoU 提到 0.95？——换更大的 SAM 不是答案
+
+### 9.1 先把误差拆开（400 张官方 GT）
+
+| 旧 `mask/` 的误差 | 数值 | 含义 |
+|---|---|---|
+| 平均 FP / FN | 2681 / 2562 px | — |
+| FP 落在 GT 边界 ±2px 内 | **29.7%** | 约 70% 是**结构性**多扰（地板/阴影） |
+| FN 落在边界带内 | **55.3%** | 约 45% 是**结构性**漏检（浅色/细薄部件） |
+| `mIoU@trim2` | 0.9505 | 只看内部一致性其实已经 ≈0.95 |
+
+另外，GT 是**硬边标签渲染**、query 是**抗锯齿 RGB 阈值**，两者是同一视角的
+**两次不同渲染**：实测 bbox 宽高比 `old/GT = 0.987 / 0.991`。也就是说存在约
+1% 的系统性几何错位（FOV / 光栅化差异），这类误差会稳定地产生 1~2px 的
+边界环。**任何分割网络都学不到这个错位**——它不是语义错误，换 SAM2/SAM3/
+ViT-H 都不会凭空把预测边界挪到另一次渲染的光栅化位置上。
+
+反过来，更大的模型还有副作用：SAM 的 1/16 分辨率 mask decoder 会**漏掉细弯管、
+薄椅腿、窄板**，§8.3 里 thin 档 SAM 比旧 mask 低 0.032 就是这个原因。
+
+### 9.2 真的试了更大的模型（同一批 60 张，严格 raw mIoU）
+
+| 方法 | 权重 | raw mIoU |
+|---|---|---|
+| 旧 `mask/` | — | 0.8887 |
+| SlimSAM（当前方案，ViT-B 蒸馏） | 14 MB | 0.8794 |
+| SlimSAM + 1px 边界补偿 | 14 MB | 0.8971 |
+| SlimSAM ∪ 旧 mask | 14 MB | 0.9052 |
+| **SAM 2.1 Hiera-B+ ONNX int8**（box + 点提示） | 108 MB | **0.8606** |
+| SAM 2.1 + 1.01 几何校准 | 108 MB | 0.8816 |
+| 旧 mask + 1.01 几何校准（**无模型**） | 0 | **0.9039** |
+
+SAM2 的 prompt 必须放到 1024 坐标空间并带 box（不带 box 只有 0.8120，
+不带坐标换算几乎输出空 mask），上面的数字已经是调好的公平版本。
+即便如此，参数量更大、架构更新的 SAM2.1 仍**低于** 14 MB 的 SlimSAM，
+更低于"什么都不学、只做几何校准"的旧 mask。
+
+**SAM 3 / 3.1 为什么没实测**：官方权重在 `facebook/sam3` 上是 **gated**
+（3.4 GB `sam3.pt` + 3.4 GB safetensors，需申请访问 + `hf auth login`），
+要求 Python ≥ 3.12、torch ≥ 2.7、CUDA ≥ 12.6，且没有官方完整 ONNX 导出
+（社区 ONNX 主要是 tracker / text-prompt 分支）。本机是 Windows + Python 3.13、
+**无 torch、无 CUDA**，无法复现；它的提升集中在开放词汇概念分割与视频跟踪，
+对"单物体白底硬边标签"的亚像素边界没有针对性。**结论是"这个任务上没必要"，
+不是"SAM2/SAM3 全面更差"**；服务器上有 48G 卡想复现，可用
+`download_sam2.py --variant large` 和 `--mode sam2`（fp16/Large 仍未测）。
+
+### 9.3 真正有效的方案：`refine.py`（无模型、无训练、约 5 ms/张）
+
+```
+shipped mask ──> remove_floor_plane()   只删「与图像外部连通的背景色/阴影」
+                                        且位于质心以下的部分；
+                                        绝不删被物体包围的浅灰座面/细腿
+             ──> calibrate_boundary()  以图像中心为原点各向同性缩放 s=1.01
+                                        （FOV 差异本来就是关于主点的径向缩放）
+```
+
+关键点：**从旧 mask 出发，而不是从 SAM 输出出发**。旧 mask 虽然脏，但它
+保留了全部细结构；我们只做减法（去地板）和一个全局几何变换。因此 FP 大降
+而 FN 不涨，正好补上 §8.3 里 SAM 的短板。
+
+`s=1.01` 是**一个固定常数**，由 `calibrate_refine.py` 在 200 张开发集上拟合，
+然后原封不动用在另外 200 张留出集上；不是逐图调参，也不是训练网络。
+`--scale 1.0` 可以完全关掉它。
+
+### 9.4 实测（官方 `seg_new_*` GT，多个不相交划分）
+
+**(a) 校准/留出协议**（常数只在校准集上拟合，留出集完全不参与）
+
+| 划分 | 旧 `mask/` | 去地板 | **+ 1.01 校准** | trim2（留出） |
+|---|---|---|---|---|
+| 400 张（200/200） | 0.9110 | 0.9235 | **0.9434**（校准集 0.9450） | 0.9639 |
+| 1200 张（600/600） | 0.9116 | 0.9254 | **0.9449**（校准集 0.9446） | 0.9651 |
+
+600 张校准集上重新网格搜索，最优仍是 **s=1.01 / centre**（dx=dy=0），
+说明这个常数不是小样本过拟合。p10 0.8451 → **0.8896**。
+尺度敏感性（400 张留出）：1.0075→0.9413、1.010→**0.9434**、1.0125→0.9419；
+加 1px 条件膨胀、dx/dy 平移、放宽颜色先验都**没有**稳定收益。
+
+**(b) 大样本复核**（固定常数 1.01，不再拟合；这一步用于消除抽样偏差）
+
+| 抽样方式 | n | 旧 `mask/` | 未校准 | **refine** | **trim2** | micro |
+|---|---|---|---|---|---|---|
+| 固定种子随机（seed=42，推荐引用） | 2000 | 0.9002 | 0.9150 | **0.9344** | **0.9554** | 0.9337 |
+| 等距（step=49） | 2000 | 0.9008 | 0.9171 | 0.9368 | 0.9581 | 0.9360 |
+
+随机样本上 median 0.9719、p10 0.8594（旧 mask 0.8195）；
+分层 solid / medium / thin = 0.9337 / 0.9368 / 0.9327，
+trim2 = 0.9490 / 0.9561 / 0.9610（三档都涨，与 SAM 在 thin 档退化相反）。
+
+> 等距抽样与不同 size 的划分之间 raw mIoU 有 ±0.005 的波动（0.934~0.945），
+> 因为按 key 排序等距取样会与数据集的分桶结构产生混叠。**报告时请用随机
+> 大样本的 0.9344，不要挑好看的小样本。**
+
+### 9.5 「0.95」到底达到了没有（如实回答）
+
+- **严格 raw mIoU：没有到 0.95**。无偏随机大样本 **0.9344**，公平的
+  校准/留出划分最好 0.9449，都差 0.005~0.016。校准后剩余误差里 FP 约 50%、
+  FN 约 73% 落在边界带**之外**，主要是浅色/细薄部件在 RGB 阈值与硬边标签
+  之间的真实分歧，以及少量残余地板；**这部分不是换分割模型能解决的**。
+- **`mIoU@trim2 = 0.9554~0.9651，稳定超过 0.95`**。按 §8.2 的协议，trim2
+  才是排除标注量化噪声后的主判据。如果论文允许报 trim / boundary-tolerant
+  IoU，0.95 已经达到；如果必须报未经任何容差的 raw mIoU，就报 **0.9344**
+  （大样本）或 **0.9449**（1200 张留出），**不要写成 0.95**。
+- 想再往上只有两条路：① 逐图几何配准（`info_*.json` 里有 `2d_bbox` /
+  相机参数，但那是标注元数据，用了等于标签泄漏，不建议）；② HQ-SAM /
+  亚像素 alpha matting 专门对齐硬边 GT——收益预计也只有千分之几，
+  却要引入 GPU 依赖。对位姿估计而言，1px 边界差异对 chamfer 粗匹配几乎无影响。
+
+### 9.6 用法（默认服务器 shape 布局）
+
+```bash
+cd ~/project/Third_Work/PTAD_plus
+
+# ① 可选：在 disjoint dev split 上重新拟合校准常数，并打印留出集成绩
+python segmentation/calibrate_refine.py \
+    --root /data/xje/datasets/brokenchairs180k/shapes \
+    --gt-root /data/xje/datasets/brokenchairs180k/annotations \
+    --limit 400 --json refine_calib.json
+
+# ② 全库生成 mask_refined/（无权重、无 GPU，8 个 shape 并行）
+python segmentation/run_segmentation.py \
+    --root /data/xje/datasets/brokenchairs180k/shapes \
+    --mode refine --workers 8
+
+# ③ 用同一套 mIoU 协议评估
+python segmentation/eval_miou.py \
+    --root /data/xje/datasets/brokenchairs180k/shapes \
+    --gt-root /data/xje/datasets/brokenchairs180k/annotations \
+    --pred-subdir mask --pred-subdir mask_refined \
+    --csv miou_refined.csv --json miou_refined.json
+
+# ④ 接到位姿估计
+python train.py --root .../shape_1095 --codebook-mode refs \
+    --mask-subdir mask_refined
+```
+
+`--mode refine` 默认读 `mask/`、写 `mask_refined/`（`--source-subdir` /
+`--out-subdir` 可改）；`--scale 1.0` 关闭校准（大样本 0.9150）。
+`--prior-threshold 205` 只在小样本上有 +0.001，随机大样本无收益（0.9367
+vs 0.9368），默认关闭。本地扁平发布版用 `--layout bucket --mask-subdir masks`。
+
+### 9.7 必须说清楚的边界
+
+1. `refine.py` 使用了数据集自带的 `mask/`（阈值分割产物）和 RGB，等价于
+   利用了渲染缓冲信息。它**不是纯 RGB 零样本分割**，不能与 SAM 类方法的
+   "零样本分割"成绩直接比较；它的定位是**给位姿估计提供更准的查询 mask**。
+2. `s=1.01` 是用官方 GT 的一个**不相交** split 拟合的全局边界补偿常数，
+   必须在论文里注明；`--scale 1.0` 的结果（0.9235）才是完全未校准的成绩。
+3. SAM2 的对比是 **int8 ONNX + CPU**；fp16 / SAM2-Large / 服务器 GPU 未测。
+   SAM3 因权重 gated 与环境限制未实测。
+
+### 9.8 新增文件
+
+| 文件 | 作用 |
+|---|---|
+| `refine.py` | 去地板 + 全局边界校准，无模型 |
+| `calibrate_refine.py` | 在 disjoint split 上拟合校准常数并报告留出集 mIoU |
+| `sam2_onnx.py` | 可选 SAM 2.1 ONNX 后端（复现 §9.2 对比用） |
+| `download_sam2.py` | 下载 SAM 2.1 ONNX 权重（tiny/small/base-plus/large） |

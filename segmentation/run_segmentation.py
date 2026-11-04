@@ -34,8 +34,10 @@ import numpy as np
 
 try:
     from core import SAMSegmenter, imread, imwrite, load_rgb, segment_image
+    from refine import refine_mask, DEFAULT_SCALE, DEFAULT_ORIGIN
 except ImportError:
     from .core import SAMSegmenter, imread, imwrite, load_rgb, segment_image
+    from .refine import refine_mask, DEFAULT_SCALE, DEFAULT_ORIGIN
 
 
 _SAM = None
@@ -47,11 +49,18 @@ def _init_worker(args):
     global _SAM, _ARGS
     _ARGS = args
     _SAM = None
-    if args.mode in ("auto", "sam"):
+    if args.mode in ("auto", "sam", "sam2"):
         try:
-            _SAM = SAMSegmenter(args.model_dir)
+            if args.mode == "sam2":
+                try:
+                    from sam2_onnx import SAM2Segmenter
+                except ImportError:
+                    from .sam2_onnx import SAM2Segmenter
+                _SAM = SAM2Segmenter(args.model_dir)
+            else:
+                _SAM = SAMSegmenter(args.model_dir)
         except Exception as exc:
-            if args.mode == "sam":
+            if args.mode in ("sam", "sam2"):
                 raise
             print(f"[warn] SAM unavailable ({exc}); using CV mode", flush=True)
 
@@ -67,7 +76,7 @@ def _compare_panel(shape_root, out_dir, args, names, limit=6):
     rows = []
     for name in names[:limit]:
         rgb = load_rgb(shape_root / args.images_subdir / name)
-        old_p = shape_root / "mask" / name
+        old_p = shape_root / getattr(args, "source_subdir", "mask") / name
         new_p = out_dir / name
         old = imread(old_p, cv2.IMREAD_GRAYSCALE) if old_p.is_file() \
             else np.zeros(rgb.shape[:2], np.uint8)
@@ -106,8 +115,21 @@ def _process_shape(task):
             continue
         try:
             rgb = load_rgb(p)
-            res = segment_image(rgb, _SAM, mode=("cv" if _SAM is None else args.mode))
-            mask = res["mask"]
+            if args.mode == "refine":
+                src = shape_root / args.source_subdir / p.name
+                if not src.is_file():
+                    raise FileNotFoundError(f"source mask missing: {src}")
+                old = imread(src, cv2.IMREAD_GRAYSCALE) > 127
+                res = refine_mask(rgb, old, scale=args.scale,
+                                  origin=args.origin, dx=args.dx, dy=args.dy,
+                                  cond_dilate=args.cond_dilate,
+                                  prior_threshold=args.prior_threshold)
+                mask, method = res["mask"], "refine"
+            else:
+                res = segment_image(rgb, _SAM,
+                                    mode=("cv" if _SAM is None else
+                                          "sam" if args.mode == "sam2" else args.mode))
+                mask, method = res["mask"], res["method"]
             if args.dilate:
                 r = abs(args.dilate)
                 kernel = cv2.getStructuringElement(
@@ -115,9 +137,13 @@ def _process_shape(task):
                 mask = cv2.dilate(mask, kernel) if args.dilate > 0 \
                     else cv2.erode(mask, kernel)
             imwrite(dest, mask)
-            methods[res["method"]] = methods.get(res["method"], 0) + 1
-            metrics.append(dict(name=p.name, method=res["method"],
-                                **res["metrics"].as_dict()))
+            methods[method] = methods.get(method, 0) + 1
+            rec = dict(name=p.name, method=method)
+            if "metrics" in res:
+                rec.update(res["metrics"].as_dict())
+            else:
+                rec["area"] = int((mask > 0).sum())
+            metrics.append(rec)
             done += 1
         except Exception as exc:
             metrics.append(dict(name=p.name, method="FAILED", error=str(exc)))
@@ -190,7 +216,28 @@ def main():
                     help="output subdir INSIDE each shape (default mask_clean)")
     ap.add_argument("--mask-root", default=None,
                     help="if set, write to <mask-root>/<shape>/ instead")
-    ap.add_argument("--mode", choices=["auto", "sam", "cv"], default="auto")
+    ap.add_argument("--mode", choices=["auto", "sam", "cv", "refine", "sam2"],
+                    default="auto",
+                    help="auto/sam/cv: SlimSAM + CV fallback (see README sec.3); "
+                         "refine: deterministic render-buffer refinement of the "
+                         "shipped mask (best raw mIoU, no weights needed, "
+                         "see README sec.9); sam2: optional SAM2.1 ONNX backend")
+    ap.add_argument("--source-subdir", default="mask",
+                    help="shipped masks read by --mode refine (default mask)")
+    ap.add_argument("--scale", type=float, default=None,
+                    help="boundary calibration scale for --mode refine "
+                         "(default 1.010 from calibrate_refine.py; 1.0 disables)")
+    ap.add_argument("--origin", choices=["centre", "centroid"], default=None,
+                    help="scale origin for --mode refine (default centre)")
+    ap.add_argument("--dx", type=float, default=0.0)
+    ap.add_argument("--dy", type=float, default=0.0)
+    ap.add_argument("--cond-dilate", type=int, default=0,
+                    help="optional colour-conditioned 1px dilation threshold "
+                         "(0 = off, default)")
+    ap.add_argument("--prior-threshold", type=int, default=200,
+                    help="--mode refine only: loosen the colour prior to "
+                         "min(rgb)<T before floor removal (200 = keep the "
+                         "shipped mask; 205/210 slightly improves mIoU)")
     ap.add_argument("--dilate", type=int, default=0,
                     help="optional boundary compensation on the OUTPUT masks: "
                          "+1 dilates 1 px. Masks derived from anti-aliased RGB "
@@ -208,6 +255,14 @@ def main():
     ap.add_argument("--report", default=None, help="write JSON report here")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
+    if args.scale is None:
+        args.scale = DEFAULT_SCALE if args.mode == "refine" else 1.0
+    if args.origin is None:
+        args.origin = DEFAULT_ORIGIN
+    if args.mode == "refine" and args.out_subdir == "mask_clean":
+        args.out_subdir = "mask_refined"
+    if args.mode == "sam2" and args.out_subdir == "mask_clean":
+        args.out_subdir = "mask_sam2"
 
     root = Path(args.root)
     shapes = sorted(p for p in root.iterdir() if p.is_dir()
