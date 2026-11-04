@@ -107,7 +107,14 @@ def _process_shape(task):
         try:
             rgb = load_rgb(p)
             res = segment_image(rgb, _SAM, mode=("cv" if _SAM is None else args.mode))
-            imwrite(dest, res["mask"])
+            mask = res["mask"]
+            if args.dilate:
+                r = abs(args.dilate)
+                kernel = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+                mask = cv2.dilate(mask, kernel) if args.dilate > 0 \
+                    else cv2.erode(mask, kernel)
+            imwrite(dest, mask)
             methods[res["method"]] = methods.get(res["method"], 0) + 1
             metrics.append(dict(name=p.name, method=res["method"],
                                 **res["metrics"].as_dict()))
@@ -154,6 +161,7 @@ def _summarise(results, elapsed, args, report_path):
     if report_path:
         payload = {
             "config": {"root": args.root, "mode": args.mode,
+                       "dilate": args.dilate,
                        "out_subdir": args.out_subdir,
                        "mask_root": args.mask_root,
                        "workers": args.workers,
@@ -183,6 +191,12 @@ def main():
     ap.add_argument("--mask-root", default=None,
                     help="if set, write to <mask-root>/<shape>/ instead")
     ap.add_argument("--mode", choices=["auto", "sam", "cv"], default="auto")
+    ap.add_argument("--dilate", type=int, default=0,
+                    help="optional boundary compensation on the OUTPUT masks: "
+                         "+1 dilates 1 px. Masks derived from anti-aliased RGB "
+                         "sit ~1 px inside hard-edged renderer GT; enabling "
+                         "this aligns them for mIoU scoring. Default 0 "
+                         "(unmodified). See segmentation/README.md sec. 8.")
     ap.add_argument("--model-dir", default=os.path.join(here, "models"))
     ap.add_argument("--workers", type=int, default=1,
                     help="parallel shape workers (each loads its own ONNX session)")

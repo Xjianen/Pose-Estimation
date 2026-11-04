@@ -161,6 +161,24 @@ python train.py --root /data/.../shapes/shape_1095 \
 孤立噪声块 24.27→**0**，平均每张剔除 3758 px 阴影。详见
 [`segmentation/README.md`](segmentation/README.md)。
 
+**像素级 mIoU（有官方真值）**：`annotations/**/seg_new_*.png` 是部件标签
+（`0`=背景、`38`=异常部件、`42`=正常部件），`>0` 即查询视角的干净前景剪影；
+`mask_new_*` / `mask_old_*` 只是异常区域小块、`seg_old_*` 是异常前剪影，**别用错**。
+只有 `*_anomaly` 查询有标注（约 56%），脚本会打印覆盖率：
+
+```bash
+python segmentation/eval_miou.py \
+    --root /data/xje/datasets/brokenchairs180k/shapes \
+    --gt-root /data/xje/datasets/brokenchairs180k/annotations \
+    --pred-subdir mask --pred-subdir mask_clean \
+    --csv miou.csv --json miou.json --panel miou.png
+```
+
+GT 是硬边渲染、查询图有抗锯齿，多数误差（FN 85–91%）落在 GT 边界 ±2px 内，
+所以脚本同时给 `mIoU`（严格）与 `mIoU@trim2`（剔除边界带）、`micro`、`shape-macro`、
+FP/FN 边界带分解、细结构分层和配对 win rate。协议与实测结论见
+[`segmentation/README.md`](segmentation/README.md) 第 8 节。
+
 > **别拿 `render/` 或 `reference/` 当查询视角真值**：它们用另一套内参
 > （39.66° FOV vs 查询 50°），边界与 RGB 强梯度对齐率只有 0.86（旧 mask 是 0.98）。
 
@@ -415,8 +433,9 @@ segmentation/            重生成干净查询 mask（零样本 SlimSAM + CV 兜
     core.py              粗前景 / 阴影模型 / prompt / SAM 封装 / 质量指标
     download_models.py   下载 14 MB ONNX 权重（镜像回退）
     run_segmentation.py  批量 CLI（多进程、断点续跑、JSON 报告、对照图）
-    evaluate.py          新旧 mask 对比（表格 + CSV + 图）
-    README.md            方案选型、消融、实测指标
+    evaluate.py          新旧 mask 无监督对比（表格 + CSV + 图）
+    eval_miou.py         官方 seg_new_* 真值 mIoU（多指标 + CSV + JSON + 图）
+    README.md            方案选型、消融、实测指标、mIoU 评估协议
 aggregate_results.py     汇总 runs/*/results.json
 error_histogram.py       旋转×平移误差 4×4 分布 → CSV + 热力图
 run_batch.sh             全数据集多进程批处理

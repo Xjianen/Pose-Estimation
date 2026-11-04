@@ -81,7 +81,10 @@ RGB ──> coarse_foreground()      白底粗前景（故意过 inclusive，保
 45/45 张全部由 SAM 精修成功，**0 次兜底、0 失败**，总耗时 98.5 s（单进程 CPU）。
 可视化见 `--compare` 生成的 `compare.png`：棕椅拱洞恢复、橙椅阴影斑点消失、浅灰椅保持完整。
 
-> 评估用的是无监督质量代理，不是像素级 GT——因为查询视角没有干净 GT（原因见第 1 节）。这些指标直接对应位姿估计最在意的性质：轮廓边界正确、无阴影污染、无散点噪声。
+> 本节是无监督质量代理，不是像素级 GT。后来确认数据集的 `annotations/**/seg_new_*.png`
+> 就是查询视角的官方干净剪影（见第 8 节），**像素级 mIoU 请用 `eval_miou.py`**。
+> 这些代理指标依然有价值：它们直接对应位姿估计最在意的性质——轮廓边界正确、
+> 无阴影污染、无散点噪声，且不依赖标注。
 
 ---
 
@@ -117,6 +120,7 @@ python segmentation/evaluate.py \
 | 参数 | 说明 |
 |---|---|
 | `--mode auto\|sam\|cv` | `auto`=有模型用 SAM、否则 CV（默认）；`cv` 纯确定性、最快 |
+| `--dilate N` | 输出 mask 的边界补偿（`+1`=膨胀 1px），默认 `0` 不改动；仅在需要对齐硬边 GT 的 mIoU 时开启，见第 8 节 |
 | `--workers N` | shape 级多进程（每个进程独立 ONNX session）；GPU 模式建议 1 |
 | `--model-dir` | 权重目录，默认 `segmentation/models/` |
 | `--images-subdir` / `--out-subdir` | 默认 `images` / `mask_clean` |
@@ -150,5 +154,164 @@ python train.py --root /data/xje/datasets/brokenchairs180k/shapes/shape_1095 \
 | `core.py` | 核心库：粗前景、阴影模型、prompt 生成、SAM 封装、CV 兜底、质量指标 |
 | `download_models.py` | 下载 SlimSAM ONNX 权重（带镜像回退、大小校验） |
 | `run_segmentation.py` | 批量 CLI：多进程、断点续跑、进度、JSON 报告、对照图 |
-| `evaluate.py` | 新旧 mask 对比：终端表格 + CSV + 对照图 |
+| `evaluate.py` | 新旧 mask 无监督对比：终端表格 + CSV + 对照图 |
+| `eval_miou.py` | 官方 `seg_new_*` 真值的像素级 mIoU 评估（见第 8 节） |
 | `models/` | 下载的权重（已 gitignore，不入库） |
+
+---
+
+## 8. 官方标注的像素级 mIoU 评估
+
+### 8.1 先搞清楚标注里到底是什么
+
+`annotations/<bucket>/` 下每个 anomaly query 有 5 个文件，用途完全不同：
+
+| 文件 | 内容 | 能否当前景 GT |
+|---|---|---|
+| `seg_new_<key>.png` | 部件语义标签，`0`=背景、`38`=异常部件、`42`=正常部件 | **能，`>0` 就是异常后查询视角的完整剪影** |
+| `seg_old_<key>.png` | 异常**前**的部件标签 | 不能（形状已变，与 `seg_new` IoU 仅 0.886） |
+| `mask_new_<key>.png` | 异常部件的小块区域（≈7k px） | 不能，只是局部缺陷 mask |
+| `mask_old_<key>.png` | 异常前该部件的位置 | 不能 |
+| `info_<key>.json` | `2d_bbox` / `cam_params` / 异常配置元数据 | — |
+
+`seg_new` 的 `38` 类面积与 `mask_new` 完全一致（实测 7126 vs 7127 px），
+且 100% 落在 `seg_new` 非零区内，印证了上面的语义。
+
+**命名映射**：查询图 `render_<key>.png` ↔ 标注 `seg_new_<key>.png`，
+`key = <shape>_<examplar>_<radius>_<azim>_<elev>_<idx>_<type>`。
+同一个 shape 的不同视角会散落在**不同的 bucket 目录**里，所以 `eval_miou.py`
+按 key 建全局索引，不假设两者在同一目录。
+
+**覆盖率**：全库 177,779 张查询图里只有 99,785 个 `seg_new` 标注（**56.1%**）——
+因为 `*_normal` 查询没有标注。评估只在交集上进行，脚本会把覆盖率打在表头。
+
+**视角一致性验证**：GT 与查询图同内参。150 张上 bbox 宽高比 `old/GT = 0.987/0.991`、
+质心差仅 `(0.2, 4.9)` px、面积比 0.997，**无需配准**就能直接算 IoU。
+
+### 8.2 为什么不能只报一个 raw mIoU
+
+GT 是渲染引擎输出的**硬边标签（无抗锯齿）**，查询图是**抗锯齿 RGB**，两者对
+"边界在哪"的定义天然差 1–3 px：
+
+| 观察（120 / 40 张抽样） | 数值 |
+|---|---|
+| 分歧像素落在 GT 边界 ±2.5 px 内的比例 | **67.9%** |
+| 旧 mask：FN / FP 落在边界带内 | 88.3% / 65.8% |
+| SAM mask：FN / FP 落在边界带内 | 84.2% / 78.9% |
+| 剔除 2 px 边界带后旧 mask IoU | 0.9078 → **0.9457** |
+
+也就是说 raw mIoU 的大头在量**标注量化噪声**，而不是"阴影块 / 拱洞填平 /
+斑点"这类真实结构错误。因此协议给出一组互补指标，而不是一个数字：
+
+| 指标 | 含义 | 用途 |
+|---|---|---|
+| `mIoU` | 逐图 IoU 宏平均，`--dilate 0` | 标准、严格、可与文献比 |
+| `mIoU@trim2` | 剔除 GT 边界 ±2px 带后再算 | **主判据**：只看结构性错误 |
+| `micro IoU` | 总交 / 总并 | 防止小物体被宏平均稀释 |
+| `shape-macro` | 每个 shape 先平均再平均 | 防止 query 多的 shape 主导 |
+| `p10 / median` | 分位数 | 暴露长尾失败 |
+| `FP / FN`、`fp_blobs`、`fp_biggest` | 多扰/漏检像素与大连通块 | 直接量化阴影块与斑点 |
+| `fp/fn_band_frac` | 误差中边界带占比 | 判断 raw 分数是否被量化主导 |
+| `by_structure` | 按 GT 细结构程度分 solid/medium/thin 三档 | 细框架物体上 trim 会失效，单独看 |
+| `win/tie/lose` | 与 baseline 逐图配对比较 | 比两个独立均值敏感得多 |
+
+`--dilate 1` 是**诊断参数**，不是可以拿去报的成绩：从抗锯齿 RGB 得到的 mask
+边界通常比硬边 GT 内缩约 1 px，膨胀 1 px 能看出这个偏移贡献了多少。
+
+### 8.3 实测结论（全库均匀抽样 200 张 `*_anomaly`，跨度覆盖各 bucket）
+
+| 指标 | 旧 `mask/` | SAM `mask_clean/` | 变化 |
+|---|---|---|---|
+| **raw mIoU**（严格，`--dilate 0`） | **0.9103** | 0.8977 | −0.0127 |
+| **mIoU@trim2**（主判据） | 0.9522 | **0.9607** | **+0.0085** |
+| micro IoU | 0.9070 | 0.8985 | −0.0085 |
+| shape-macro | 0.9103 | 0.8977 | −0.0126 |
+| median / p10 | 0.9299 / 0.8353 | 0.9242 / 0.8029 | — |
+| 平均 FP（多扰像素） | 2689 | **1111** | **−58.7%** |
+| 平均 FN（漏检像素） | 2252 | 4118 | +82.9% |
+| 最大 FP 连通块（阴影块） | 1944 px | **629 px** | **−67.6%** |
+| FP 连通块数（斑点） | 1.98 | **1.32** | −33.3% |
+| 误差落在边界带内 FP / FN | 65.6% / 90.7% | 80.8% / 85.7% | — |
+| 配对 win / tie / lose | — | 63 / 0 / 137 | 31.5% win |
+
+**按 GT 细结构程度分层**（这是最关键的一张表）：
+
+| GT 结构 | n | 旧 `mask/` | SAM | 差 |
+|---|---|---|---|---|
+| solid（实心大块） | 66 | 0.9028 | **0.9065** | **+0.0037** |
+| medium | 68 | **0.9183** | 0.9086 | −0.0097 |
+| thin（细框架 / 薄板） | 66 | **0.9096** | 0.8776 | **−0.0320** |
+
+**边界补偿诊断**（同一 200 张，`eval_miou.py --dilate N`）：
+
+| | dilate 0 | dilate 1 | dilate 2 |
+|---|---|---|---|
+| 旧 `mask/` | 0.9103 | 0.9077 | 0.8765 |
+| SAM `mask_clean/` | 0.8977 | **0.9158** | 0.9042 |
+| Δ(SAM − 旧) | −0.0127 | **+0.0080** | +0.0276 |
+
+**怎么解读（结论是混合的，不是"全面变好"）**：
+
+1. **单一 raw mIoU 会误导**。85–91% 的 FN、66–81% 的 FP 都在 GT 边界 ±2px 内；
+   GT 是硬边渲染、查询图有抗锯齿，从 RGB 得到的 mask 边界系统性内缩约 1 px。
+   给预测补 1 px 后 SAM 就从落后 0.0127 变成领先 0.0080。
+2. **结构上 SAM 确实更好**：trim IoU 提升、FP 减 59%、最大阴影块减 68%、
+   斑点连通块减 33%。这些正是位姿估计 chamfer 粗匹配最敏感的东西
+   （大块阴影会把粗匹配拉到错误视角），而 1px 边界差异对 chamfer 几乎无影响。
+3. **退化集中在细框架物体**（thin 档 −0.032）：SAM 会把细弯管、薄椅腿、
+   窄板断裂漏掉；实心物体上反而略好。这是当前方案已知的短板。
+4. 因此**推荐主判据是 `mIoU@trim2` + FP 结构指标 + 分层**，而不是 raw mIoU；
+   `--dilate 1` 只作为边界偏移的诊断，不要当成常规成绩上报。
+
+**可操作建议**：
+
+- 若目标是位姿估计精度：保持 `run_segmentation.py` 默认（`--dilate 0`），
+  别把 1px 边界加回去，那会略微复活阴影。
+- 若目标是在官方 GT 上刷 raw mIoU：生成时加 `--dilate 1`
+  （或评估时用 `eval_miou.py --dilate 1`），但要如实说明做了边界补偿。
+- 后续改进方向：对被 SAM 删掉的**细长连通块**做保护（或与旧 `mask/` 的
+  细结构部分融合），专门补 thin 档的 0.032 缺口。
+
+### 8.4 用法（服务器 shape 布局）
+
+```bash
+cd ~/project/Third_Work/PTAD_plus
+
+# 已有 mask_clean/（推荐，纯 numpy/cv2，秒级）
+python segmentation/eval_miou.py \
+    --root /data/xje/datasets/brokenchairs180k/shapes \
+    --gt-root /data/xje/datasets/brokenchairs180k/annotations \
+    --pred-subdir mask --pred-subdir mask_clean \
+    --csv /data/xje/datasets/brokenchairs180k/runs/miou.csv \
+    --json /data/xje/datasets/brokenchairs180k/runs/miou.json \
+    --panel /data/xje/datasets/brokenchairs180k/runs/miou.png
+
+# 还没生成 mask_clean：即时跑分割并评估（需要 onnxruntime，约 2 s/张）
+python segmentation/eval_miou.py --root ... --gt-root ... \
+    --pred-subdir mask --predict --limit 200 --csv miou.csv
+
+# 生成"边界补偿版" mask 后再评估（见 8.3）
+python segmentation/run_segmentation.py \
+    --root /data/xje/datasets/brokenchairs180k/shapes \
+    --out-subdir mask_clean_d1 --dilate 1 --workers 8
+python segmentation/eval_miou.py \
+    --root /data/xje/datasets/brokenchairs180k/shapes \
+    --gt-root /data/xje/datasets/brokenchairs180k/annotations \
+    --pred-subdir mask --pred-subdir mask_clean_d1 --csv miou_d1.csv
+
+# 诊断：边界偏移贡献了多少 / 换 trim 半径 / 只看某几个 shape
+python segmentation/eval_miou.py --root ... --gt-root ... \
+    --pred-subdir mask --pred-subdir mask_clean --dilate 1
+python segmentation/eval_miou.py --root ... --gt-root ... --trim-radius 0
+python segmentation/eval_miou.py --root ... --gt-root ... --shape shape_1095
+```
+
+`--gt-root` 用递归扫描 `seg_new_*.png`，所以服务器上的标注无论是在
+`annotations/<bucket>/` 分桶、按 shape 拆开，还是平铺，都能自动索引。
+`--layout bucket` 只在评估**本地扁平发布版**（`<root>/images/<bucket>/`、
+`<root>/masks/<bucket>/`）时才需要，代码与文档的默认路径一律按服务器
+shape 布局。
+
+**输出**：终端表格、逐图逐方法 CSV（含 `iou` / `iou_trim` / `fp` / `fn` /
+边界带占比 / 连通块）、汇总 JSON、`miou.png`（挑 dIoU 最大/最小的样本，
+RGB \| GT \| baseline \| best，全英文标注）。
